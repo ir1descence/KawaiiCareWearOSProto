@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">Kawaii Care</string>
+    <!--
+    This string is used for square devices and overridden by hello_world in
+    values-round/strings.xml for round devices.
+    -->
+    <string name="hello_world">From the Square world,\nHello, %1$s!</string>
+    <string name="animation_description">Animated character display</string>
+
+    <string name="settings_title">Setup</string>
+    <string name="pairing_button">Pairing</string>
+    <string name="pairing_status_unknown">Checking pairing status…</string>
+    <string name="pairing_status_paired">Paired to a handheld device</string>
+    <string name="pairing_status_not_paired">Not paired to a handheld device</string>
+    <string name="alarm_icon_description">Alarm set</string>
+    <string name="loading_pairing">Pairing in progress…</string>
+    <string name="connected">Connected</string>
+    <string name="searching">Searching...</string>
+</resources>

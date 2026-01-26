@@ -1,0 +1,48 @@
+<!-- 
+  Drawable Resources Guide for MainActivity Animation
+  
+  This file documents the required PNG files for the animation sequences.
+  Place your PNG files in res/drawable/ with the following names:
+  
+  Normal/Upright Sequence (10 frames):
+  - frame_normal_01.png
+  - frame_normal_02.png
+  - frame_normal_03.png
+  - frame_normal_04.png
+  - frame_normal_05.png
+  - frame_normal_06.png
+  - frame_normal_07.png
+  - frame_normal_08.png
+  - frame_normal_09.png
+  - frame_normal_10.png
+  
+  Tilted Sequence (10 frames):
+  - frame_tilted_01.png
+  - frame_tilted_02.png
+  - frame_tilted_03.png
+  - frame_tilted_04.png
+  - frame_tilted_05.png
+  - frame_tilted_06.png
+  - frame_tilted_07.png
+  - frame_tilted_08.png
+  - frame_tilted_09.png
+  - frame_tilted_10.png
+  
+  Shake/Active Sequence (10 frames):
+  - frame_shake_01.png
+  - frame_shake_02.png
+  - frame_shake_03.png
+  - frame_shake_04.png
+  - frame_shake_05.png
+  - frame_shake_06.png
+  - frame_shake_07.png
+  - frame_shake_08.png
+  - frame_shake_09.png
+  - frame_shake_10.png
+  
+  Notes:
+  - All PNG files should be optimized for Wear OS (recommended size: 320x320 or 400x400 pixels)
+  - Use transparent backgrounds if needed
+  - Keep file sizes small for better performance and battery life
+  - You can adjust the number of frames per sequence in MainActivity.java
+-->
