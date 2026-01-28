@@ -1,4 +1,4 @@
-package com.fufelshmertzpakostincorporated.kawaicare;
+package com.fufelshmertzpakostincorporated.kawaicare.animation;
 
 import android.content.Context;
 import android.graphics.Bitmap;

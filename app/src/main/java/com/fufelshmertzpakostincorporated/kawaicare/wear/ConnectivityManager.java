@@ -1,4 +1,4 @@
-package com.fufelshmertzpakostincorporated.kawaicare;
+package com.fufelshmertzpakostincorporated.kawaicare.wear;
 
 import android.content.Context;
 import android.util.Log;

@@ -1,4 +1,4 @@
-package com.fufelshmertzpakostincorporated.kawaicare;
+package com.fufelshmertzpakostincorporated.kawaicare.animation;
 
 import java.util.ArrayList;
 import java.util.List;

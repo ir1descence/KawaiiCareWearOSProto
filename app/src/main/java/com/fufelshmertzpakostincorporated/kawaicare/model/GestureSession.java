@@ -1,4 +1,4 @@
-package com.fufelshmertzpakostincorporated.kawaicare;
+package com.fufelshmertzpakostincorporated.kawaicare.model;
 
 import java.io.Serializable;
 import java.util.ArrayList;

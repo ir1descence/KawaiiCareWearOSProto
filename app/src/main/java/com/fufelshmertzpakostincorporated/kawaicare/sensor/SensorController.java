@@ -1,4 +1,4 @@
-package com.fufelshmertzpakostincorporated.kawaicare;
+package com.fufelshmertzpakostincorporated.kawaicare.sensor;
 
 import android.content.Context;
 import android.hardware.Sensor;

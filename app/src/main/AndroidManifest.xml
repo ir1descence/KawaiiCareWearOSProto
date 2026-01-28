@@ -36,7 +36,7 @@
 
         <!-- Launcher Activity - Home Screen -->
         <activity
-            android:name=".MainActivity"
+            android:name=".ui.MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:taskAffinity=""
@@ -52,7 +52,7 @@
 
         <!-- Settings Activity -->
         <activity
-            android:name=".SettingsActivity"
+            android:name=".ui.SettingsActivity"
             android:exported="false"
             android:taskAffinity=""
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
@@ -77,7 +77,7 @@
 
         <!-- Loading Activity -->
         <activity
-            android:name=".LoadingActivity"
+            android:name=".ui.LoadingActivity"
             android:exported="false"
             android:taskAffinity=""
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />

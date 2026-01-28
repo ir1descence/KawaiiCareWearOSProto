@@ -15,6 +15,11 @@ import com.google.android.gms.wearable.PutDataRequest;
 import com.google.android.gms.wearable.Wearable;
 import com.google.android.gms.wearable.WearableListenerService;
 
+import com.fufelshmertzpakostincorporated.kawaicare.animation.AnimationRenderer;
+import com.fufelshmertzpakostincorporated.kawaicare.animation.AnimationStateRepository;
+import com.fufelshmertzpakostincorporated.kawaicare.ui.MainActivity;
+import com.fufelshmertzpakostincorporated.kawaicare.data.AlarmStatusRepository;
+
 import java.util.ArrayList;
 
 /**

@@ -1,4 +1,4 @@
-package com.fufelshmertzpakostincorporated.kawaicare;
+package com.fufelshmertzpakostincorporated.kawaicare.ui;
 
 import android.app.Activity;
 import android.content.Intent;
@@ -10,6 +10,9 @@ import android.view.View;
 import android.widget.ImageView;
 import android.widget.ProgressBar;
 import android.widget.TextView;
+
+import com.fufelshmertzpakostincorporated.kawaicare.wear.ConnectivityManager;
+import com.fufelshmertzpakostincorporated.kawaicare.R;
 
 /**
  * Loading Activity.

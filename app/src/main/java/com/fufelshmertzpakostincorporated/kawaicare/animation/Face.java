@@ -1,4 +1,4 @@
-package com.fufelshmertzpakostincorporated.kawaicare;
+package com.fufelshmertzpakostincorporated.kawaicare.animation;
 
 import android.graphics.Point;
 import java.util.HashMap;

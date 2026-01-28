@@ -1,4 +1,4 @@
-package com.fufelshmertzpakostincorporated.kawaicare;
+package com.fufelshmertzpakostincorporated.kawaicare.recording;
 
 import android.content.Context;
 import android.hardware.Sensor;
@@ -16,6 +16,8 @@ import com.google.android.gms.tasks.Task;
 import com.google.android.gms.tasks.Tasks;
 import com.google.android.gms.wearable.Node;
 import com.google.android.gms.wearable.Wearable;
+
+import com.fufelshmertzpakostincorporated.kawaicare.model.GestureSession;
 
 import java.io.File;
 import java.io.FileOutputStream;

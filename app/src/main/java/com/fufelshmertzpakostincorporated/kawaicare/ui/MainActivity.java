@@ -1,4 +1,4 @@
-package com.fufelshmertzpakostincorporated.kawaicare;
+package com.fufelshmertzpakostincorporated.kawaicare.ui;
 
 import android.app.Activity;
 import android.content.BroadcastReceiver;
@@ -10,6 +10,11 @@ import android.os.Bundle;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.widget.ImageView;
+
+import com.fufelshmertzpakostincorporated.kawaicare.sensor.SensorController;
+import com.fufelshmertzpakostincorporated.kawaicare.recording.GestureRecordingController;
+import com.fufelshmertzpakostincorporated.kawaicare.animation.AnimationRenderer;
+import com.fufelshmertzpakostincorporated.kawaicare.animation.AnimationStateRepository;
 
 /**
  * Main Activity / Watch Face Home Launcher.

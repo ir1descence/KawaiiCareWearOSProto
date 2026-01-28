@@ -5,7 +5,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/settingsBackgroundColor"
-    tools:context=".SettingsActivity"
+    tools:context=".ui.SettingsActivity"
     tools:deviceIds="wear">
 
     <LinearLayout
