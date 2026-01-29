@@ -4,19 +4,22 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.widget.ImageView;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Modular Animation Manager.
  * Handles frame-by-frame cycling.
  * Supports two modes: legacy FaceCompositor or direct folder animation.
+ * 
+ * Bitmap loading is done on a background thread to prevent UI freezing.
  */
 public class AnimationRenderer {
 
@@ -40,13 +43,17 @@ public class AnimationRenderer {
     private final ImageView targetView;
     private final Handler handler = new Handler(Looper.getMainLooper());
     
+    // Background thread for bitmap loading
+    private HandlerThread loadingThread;
+    private Handler loadingHandler;
+    
     // Default initial state
     private AnimState currentState = AnimState.IDLE;
-    private boolean isRunning = false;
+    private volatile boolean isRunning = false;
     private int currentFrameIndex = 0;
 
-    // Optimization: Frames per second target (e.g., 15 FPS for battery saving)
-    private static final long FRAME_DELAY_MS = 1;
+    // Optimization: Target ~20 FPS for battery efficiency on Wear OS
+    private static final long FRAME_DELAY_MS = 33;
 
     // Legacy compositor mode
     private Face face;
@@ -54,14 +61,23 @@ public class AnimationRenderer {
 
     // New folder animation mode
     private AnimationMode mode = AnimationMode.COMPOSITOR;
-    private String currentFolderPath;
+    private volatile String currentFolderPath;
     private List<String> frameFiles = new ArrayList<>();
-    private List<Bitmap> cachedFrames = new ArrayList<>();
+    private final CopyOnWriteArrayList<Bitmap> cachedFrames = new CopyOnWriteArrayList<>();
     private boolean enableFrameCache = false;
+    private volatile boolean isPreloading = false;
+
+    // Track previous non-cached frame for memory management
+    private Bitmap previousNonCachedFrame;
 
     public AnimationRenderer(Context context, ImageView targetView) {
         this.context = context;
         this.targetView = targetView;
+        
+        // Initialize background loading thread
+        loadingThread = new HandlerThread("AnimationLoader", android.os.Process.THREAD_PRIORITY_BACKGROUND);
+        loadingThread.start();
+        loadingHandler = new Handler(loadingThread.getLooper());
     }
 
     // Legacy mode setter
@@ -78,6 +94,11 @@ public class AnimationRenderer {
      * @param cacheFrames If true, preloads all frames into memory (faster but uses more RAM)
      */
     public void setFolderAnimation(String assetsFolderPath, boolean cacheFrames) {
+        // Skip if same folder already loaded
+        if (assetsFolderPath.equals(currentFolderPath) && !cachedFrames.isEmpty()) {
+            return;
+        }
+        
         this.mode = AnimationMode.FOLDER;
         this.currentFolderPath = assetsFolderPath;
         this.enableFrameCache = cacheFrames;
@@ -90,7 +111,7 @@ public class AnimationRenderer {
         loadFramesList();
         
         if (enableFrameCache) {
-            preloadFrames();
+            preloadFramesAsync();
         }
     }
 
@@ -121,14 +142,47 @@ public class AnimationRenderer {
         }
     }
 
-    private void preloadFrames() {
-        cachedFrames.clear();
-        for (String fileName : frameFiles) {
-            Bitmap frame = loadFrameFromAssets(currentFolderPath + "/" + fileName);
-            if (frame != null) {
-                cachedFrames.add(frame);
+    private void preloadFramesAsync() {
+        if (isPreloading) return;
+        isPreloading = true;
+        
+        final String folderToLoad = currentFolderPath;
+        final List<String> filesToLoad = new ArrayList<>(frameFiles);
+        
+        // Clear old cached frames first
+        recycleCachedFrames();
+        
+        loadingHandler.post(() -> {
+            List<Bitmap> loadedFrames = new ArrayList<>();
+            for (String fileName : filesToLoad) {
+                // Check if we're still loading the same folder
+                if (!folderToLoad.equals(currentFolderPath)) {
+                    // Folder changed, abort loading
+                    for (Bitmap b : loadedFrames) {
+                        if (b != null && !b.isRecycled()) b.recycle();
+                    }
+                    isPreloading = false;
+                    return;
+                }
+                
+                Bitmap frame = loadFrameFromAssets(folderToLoad + "/" + fileName);
+                if (frame != null) {
+                    loadedFrames.add(frame);
+                }
             }
-        }
+            
+            // Only update if still the same folder
+            if (folderToLoad.equals(currentFolderPath)) {
+                cachedFrames.clear();
+                cachedFrames.addAll(loadedFrames);
+            } else {
+                // Clean up since folder changed
+                for (Bitmap b : loadedFrames) {
+                    if (b != null && !b.isRecycled()) b.recycle();
+                }
+            }
+            isPreloading = false;
+        });
     }
 
     private void clearFolderAnimation() {
@@ -146,10 +200,12 @@ public class AnimationRenderer {
     }
 
     private Bitmap loadFrameFromAssets(String path) {
-        try {
-            InputStream is = context.getAssets().open(path);
-            Bitmap bitmap = BitmapFactory.decodeStream(is);
-            is.close();
+        try (InputStream is = context.getAssets().open(path)) {
+            BitmapFactory.Options opts = new BitmapFactory.Options();
+            opts.inPreferredConfig = Bitmap.Config.ARGB_8888; // preserve alpha
+            opts.inScaled = false;
+            Bitmap bitmap = BitmapFactory.decodeStream(is, null, opts);
+            if (bitmap != null) bitmap.setHasAlpha(true);
             return bitmap;
         } catch (IOException e) {
             e.printStackTrace();
@@ -226,17 +282,31 @@ public class AnimationRenderer {
             currentFrameIndex = 0;
         }
 
-        Bitmap frame;
+        Bitmap frame = null;
+        
+        // Try to get from cache first
         if (enableFrameCache && currentFrameIndex < cachedFrames.size()) {
-            frame = cachedFrames.get(currentFrameIndex);
-        } else {
+            try {
+                frame = cachedFrames.get(currentFrameIndex);
+            } catch (IndexOutOfBoundsException e) {
+                // Cache might be clearing, will load on-demand below
+            }
+        }
+        
+        // If not cached or cache miss, load on-demand (but this should be rare with async preload)
+        if (frame == null || frame.isRecycled()) {
+            // Recycle previous non-cached frame to prevent memory leak
+            if (previousNonCachedFrame != null && !previousNonCachedFrame.isRecycled()) {
+                previousNonCachedFrame.recycle();
+            }
             String framePath = currentFolderPath + "/" + frameFiles.get(currentFrameIndex);
             frame = loadFrameFromAssets(framePath);
+            previousNonCachedFrame = frame;
         }
 
-        if (frame != null) {
+        if (frame != null && !frame.isRecycled()) {
             targetView.setImageBitmap(frame);
-            targetView.invalidate();
+            // Removed explicit invalidate() - setImageBitmap handles this
         }
 
         currentFrameIndex++;
@@ -259,8 +329,6 @@ public class AnimationRenderer {
         
         // Efficiently update view with the reused master bitmap
         targetView.setImageBitmap(compositor.getLatestFrame());
-        // Invalidate to ensure the view redraws the updated bitmap content
-        targetView.invalidate();
         
         currentFrameIndex++;
     }
@@ -271,5 +339,16 @@ public class AnimationRenderer {
     public void release() {
         stop();
         recycleCachedFrames();
+        // Recycle non-cached frame if exists
+        if (previousNonCachedFrame != null && !previousNonCachedFrame.isRecycled()) {
+            previousNonCachedFrame.recycle();
+            previousNonCachedFrame = null;
+        }
+        // Shutdown loading thread
+        if (loadingThread != null) {
+            loadingThread.quitSafely();
+            loadingThread = null;
+            loadingHandler = null;
+        }
     }
 }

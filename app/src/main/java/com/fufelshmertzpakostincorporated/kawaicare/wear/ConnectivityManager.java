@@ -1,6 +1,7 @@
 package com.fufelshmertzpakostincorporated.kawaicare.wear;
 
 import android.content.Context;
+import android.content.Intent;
 import android.util.Log;
 
 import com.google.android.gms.tasks.OnCompleteListener;
@@ -52,5 +53,24 @@ public class ConnectivityManager {
                 }
             }
         });
+    }
+
+    /**
+     * Opens the Wear OS system settings to pair with a phone.
+     * Use this when no companion device is connected.
+     */
+    public void openWearOSPairingSettings() {
+        Intent intent = new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        context.startActivity(intent);
+    }
+
+    /**
+     * Alternative: Open general Wear OS settings where users can manage connectivity.
+     */
+    public void openWearOSConnectivitySettings() {
+        Intent intent = new Intent(android.provider.Settings.ACTION_SETTINGS);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        context.startActivity(intent);
     }
 }

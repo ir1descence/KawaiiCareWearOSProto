@@ -2,11 +2,12 @@ package com.fufelshmertzpakostincorporated.kawaicare.animation;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 public class AnimationStateRepository {
     private static AnimationStateRepository instance;
     private AnimationRenderer.AnimState currentState = AnimationRenderer.AnimState.IDLE;
-    private final List<AnimationStateListener> listeners = new ArrayList<>();
+    private final List<AnimationStateListener> listeners = new CopyOnWriteArrayList<>();
 
     public interface AnimationStateListener {
         void onAnimationStateChanged(AnimationRenderer.AnimState state);

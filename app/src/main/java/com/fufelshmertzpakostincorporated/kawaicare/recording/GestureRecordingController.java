@@ -7,8 +7,6 @@ import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.VibrationEffect;
-import android.os.Vibrator;
 import android.util.Log;
 import android.view.MotionEvent;
 
@@ -18,6 +16,9 @@ import com.google.android.gms.wearable.Node;
 import com.google.android.gms.wearable.Wearable;
 
 import com.fufelshmertzpakostincorporated.kawaicare.model.GestureSession;
+import com.fufelshmertzpakostincorporated.kawaicare.util.SensorFilterUtils;
+import com.fufelshmertzpakostincorporated.kawaicare.util.VibrationUtils;
+import com.fufelshmertzpakostincorporated.kawaicare.wear.WearableConstants;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -37,14 +38,9 @@ public class GestureRecordingController implements SensorEventListener {
 
     private static final String TAG = "GestureRecordingCtrl";
 
-    // Wearable message paths
-    public static final String PATH_RECORDING_SUCCESS = "/recording_success";
-    public static final String PATH_RECORDING_FAILED = "/recording_failed";
-
     // Recording configuration
     private static final long MAX_RECORDING_DURATION_MS = 10_000; // 10 seconds
     private static final long MIN_RECORDING_DURATION_MS = 500;    // 0.5 seconds
-    private static final float LOW_PASS_ALPHA = 0.25f;
 
     // Haptic patterns (ms)
     private static final long VIBRATE_START_MS = 100;
@@ -64,7 +60,6 @@ public class GestureRecordingController implements SensorEventListener {
     private final SensorManager sensorManager;
     private final Sensor accelerometer;
     private final Sensor gyroscope;
-    private final Vibrator vibrator;
     private final Handler mainHandler;
     private final ExecutorService executor;
 
@@ -108,9 +103,6 @@ public class GestureRecordingController implements SensorEventListener {
             accelerometer = null;
             gyroscope = null;
         }
-
-        // Initialize vibrator
-        vibrator = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
     }
 
     /**
@@ -207,7 +199,7 @@ public class GestureRecordingController implements SensorEventListener {
             saveSessionAsync(currentSession);
         } else {
             vibrateFail();
-            sendMessage(PATH_RECORDING_FAILED);
+            sendMessage(WearableConstants.PATH_RECORDING_FAILED);
             notifyRecordingStopped(false);
         }
 
@@ -249,10 +241,7 @@ public class GestureRecordingController implements SensorEventListener {
     private void resetFilters() {
         accelInitialized = false;
         gyroInitialized = false;
-        for (int i = 0; i < 3; i++) {
-            filteredAccel[i] = 0;
-            filteredGyro[i] = 0;
-        }
+        SensorFilterUtils.resetFilters(filteredAccel, filteredGyro);
     }
 
     private void registerSensors() {
@@ -321,21 +310,11 @@ public class GestureRecordingController implements SensorEventListener {
     }
 
     private float normalizeValue(float value, float max) {
-        return (max > 0) ? clamp(value / max, 0f, 1f) : 0.5f;
+        return SensorFilterUtils.normalize(value, max);
     }
 
     private float clamp(float value, float min, float max) {
-        return Math.max(min, Math.min(max, value));
-    }
-
-    private void applyLowPassFilter(float[] input, float[] output, boolean initialized) {
-        if (!initialized) {
-            System.arraycopy(input, 0, output, 0, input.length);
-        } else {
-            for (int i = 0; i < input.length; i++) {
-                output[i] = LOW_PASS_ALPHA * input[i] + (1f - LOW_PASS_ALPHA) * output[i];
-            }
-        }
+        return SensorFilterUtils.clamp(value, min, max);
     }
 
     // --- SensorEventListener ---
@@ -346,14 +325,12 @@ public class GestureRecordingController implements SensorEventListener {
 
         switch (event.sensor.getType()) {
             case Sensor.TYPE_ACCELEROMETER:
-                applyLowPassFilter(event.values, filteredAccel, accelInitialized);
-                accelInitialized = true;
+                accelInitialized = SensorFilterUtils.applyLowPassFilter(event.values, filteredAccel, accelInitialized);
                 accelAccuracy = event.accuracy;
                 break;
 
             case Sensor.TYPE_GYROSCOPE:
-                applyLowPassFilter(event.values, filteredGyro, gyroInitialized);
-                gyroInitialized = true;
+                gyroInitialized = SensorFilterUtils.applyLowPassFilter(event.values, filteredGyro, gyroInitialized);
                 gyroAccuracy = event.accuracy;
                 break;
         }
@@ -382,10 +359,10 @@ public class GestureRecordingController implements SensorEventListener {
             mainHandler.post(() -> {
                 if (success) {
                     Log.d(TAG, "Session saved: " + session.getSessionId());
-                    sendMessage(PATH_RECORDING_SUCCESS);
+                    sendMessage(WearableConstants.PATH_RECORDING_SUCCESS);
                 } else {
                     Log.e(TAG, "Failed to save session");
-                    sendMessage(PATH_RECORDING_FAILED);
+                    sendMessage(WearableConstants.PATH_RECORDING_FAILED);
                 }
                 notifyRecordingStopped(success);
             });
@@ -435,35 +412,15 @@ public class GestureRecordingController implements SensorEventListener {
     // --- Haptic Feedback ---
 
     private void vibrateStart() {
-        vibrate(VIBRATE_START_MS);
+        VibrationUtils.vibrate(context, VIBRATE_START_MS);
     }
 
     private void vibrateSuccess() {
-        vibrate(VIBRATE_PATTERN_SUCCESS);
+        VibrationUtils.vibrate(context, VIBRATE_PATTERN_SUCCESS, -1);
     }
 
     private void vibrateFail() {
-        vibrate(VIBRATE_PATTERN_FAIL);
-    }
-
-    private void vibrate(long durationMs) {
-        if (vibrator == null || !vibrator.hasVibrator()) return;
-
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            vibrator.vibrate(VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE));
-        } else {
-            vibrator.vibrate(durationMs);
-        }
-    }
-
-    private void vibrate(long[] pattern) {
-        if (vibrator == null || !vibrator.hasVibrator()) return;
-
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1));
-        } else {
-            vibrator.vibrate(pattern, -1);
-        }
+        VibrationUtils.vibrate(context, VIBRATE_PATTERN_FAIL, -1);
     }
 
     // --- Listener Notification ---

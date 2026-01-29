@@ -15,10 +15,12 @@ import com.google.android.gms.wearable.PutDataRequest;
 import com.google.android.gms.wearable.Wearable;
 import com.google.android.gms.wearable.WearableListenerService;
 
+import com.fufelshmertzpakostincorporated.kawaicare.alarm.SignalRegistry;
 import com.fufelshmertzpakostincorporated.kawaicare.animation.AnimationRenderer;
 import com.fufelshmertzpakostincorporated.kawaicare.animation.AnimationStateRepository;
 import com.fufelshmertzpakostincorporated.kawaicare.ui.MainActivity;
 import com.fufelshmertzpakostincorporated.kawaicare.data.AlarmStatusRepository;
+import com.fufelshmertzpakostincorporated.kawaicare.wear.WearableConstants;
 
 import java.util.ArrayList;
 
@@ -32,21 +34,8 @@ public class WearEventsService extends WearableListenerService {
 
     private static final String TAG = "WearEventsService";
 
-    // Data layer paths/keys
-    private static final String PATH_ALARM_STATUS = "/alarm_status";
-    private static final String KEY_ALARM_STATUS = "key_alarm_status";
-
-    private static final String PATH_ANIMATION_STATE = "/animation_state";
-    private static final String KEY_ANIM_STATE = "key_animation_state";
-
-    // Available emotions list
-    private static final String PATH_AVAILABLE_EMOTIONS = "/available_emotions";
-    private static final String KEY_EMOTIONS_LIST = "key_emotions_list";
-
-    // Message paths (from phone)
-    public static final String PATH_START_RECORDING = "/start_custom_recording";
-    public static final String PATH_STOP_RECORDING = "/stop_custom_recording";
-    public static final String PATH_REQUEST_EMOTIONS = "/request_emotions";
+    // Signal Registry instance (lazy initialized)
+    private SignalRegistry signalRegistry;
 
     @Override
     public void onDataChanged(DataEventBuffer dataEvents) {
@@ -68,22 +57,22 @@ public class WearEventsService extends WearableListenerService {
             return;
         }
 
-        if (PATH_ALARM_STATUS.equals(path)) {
+        if (WearableConstants.PATH_ALARM_STATUS.equals(path)) {
             DataMap dataMap = DataMapItem.fromDataItem(item).getDataMap();
-            String status = dataMap.getString(KEY_ALARM_STATUS);
+            String status = dataMap.getString(WearableConstants.KEY_ALARM_STATUS);
 
             Log.d(TAG, "Alarm status received: " + status);
 
             if (status != null) {
-                boolean isAlarmOn = "ON".equalsIgnoreCase(status);
+                boolean isAlarmOn = WearableConstants.ALARM_STATUS_ON.equalsIgnoreCase(status);
                 AlarmStatusRepository.getInstance().setAlarmStatus(isAlarmOn);
             }
             return;
         }
 
-        if (PATH_ANIMATION_STATE.equals(path)) {
+        if (WearableConstants.PATH_ANIMATION_STATE.equals(path)) {
             DataMap dataMap = DataMapItem.fromDataItem(item).getDataMap();
-            String anim = dataMap.getString(KEY_ANIM_STATE);
+            String anim = dataMap.getString(WearableConstants.KEY_ANIM_STATE);
 
             Log.d(TAG, "Animation state received: " + anim);
 
@@ -95,6 +84,82 @@ public class WearEventsService extends WearableListenerService {
                     Log.w(TAG, "Unknown animation state received: " + anim);
                 }
             }
+            return;
+        }
+
+        if (WearableConstants.PATH_ACTIVE_ALARM_GESTURE.equals(path)) {
+            handleActiveAlarmGestureChange(item);
+            return;
+        }
+    }
+
+    /**
+     * Handle changes to the active alarm gesture/signal from the phone.
+     * Updates the AlarmStatusRepository with the new active stop signal.
+     */
+    private void handleActiveAlarmGestureChange(DataItem item) {
+        DataMap dataMap = DataMapItem.fromDataItem(item).getDataMap();
+        String signal = dataMap.getString(WearableConstants.KEY_ACTIVE_SIGNAL);
+
+        Log.d(TAG, "Active alarm gesture received: " + signal);
+
+        if (signal == null || signal.isEmpty()) {
+            Log.w(TAG, "Received empty signal, ignoring");
+            return;
+        }
+
+        // Initialize signal registry if needed
+        if (signalRegistry == null) {
+            signalRegistry = new SignalRegistry(this);
+        }
+
+        // Validate the signal
+        SignalRegistry.ValidationResult validation = signalRegistry.validateSignal(signal);
+        
+        if (!validation.isValid()) {
+            Log.w(TAG, "Signal validation failed: " + validation.getErrorCode() 
+                    + " - " + validation.getErrorMessage());
+            // Send error response back to phone
+            sendSignalValidationError(signal, validation);
+            return;
+        }
+
+        // Handle custom gesture mapping
+        String customGesturePath = null;
+        if (SignalRegistry.SIGNAL_CUSTOM.equals(signal)) {
+            customGesturePath = signalRegistry.getCustomGestureFilePath();
+            Log.d(TAG, "Custom signal selected, gesture file: " + customGesturePath);
+        }
+
+        // Update the repository with the new active signal
+        AlarmStatusRepository.getInstance().setActiveStopSignal(signal, customGesturePath);
+        
+        Log.d(TAG, "Active stop signal updated to: " + signal);
+    }
+
+    /**
+     * Send a validation error response back to the phone when a signal is not supported.
+     */
+    private void sendSignalValidationError(String signal, SignalRegistry.ValidationResult validation) {
+        try {
+            PutDataMapRequest putDataMapReq = PutDataMapRequest.create("/signal_validation_error");
+            DataMap dataMap = putDataMapReq.getDataMap();
+            dataMap.putString("requested_signal", signal);
+            dataMap.putString("error_code", validation.getErrorCode());
+            dataMap.putString("error_message", validation.getErrorMessage());
+            dataMap.putLong("timestamp", System.currentTimeMillis());
+
+            PutDataRequest putDataReq = putDataMapReq.asPutDataRequest();
+            putDataReq.setUrgent();
+
+            Task<DataItem> putDataTask = Wearable.getDataClient(this).putDataItem(putDataReq);
+            putDataTask.addOnSuccessListener(dataItem -> 
+                Log.d(TAG, "Signal validation error sent successfully")
+            ).addOnFailureListener(e -> 
+                Log.e(TAG, "Failed to send signal validation error", e)
+            );
+        } catch (Exception e) {
+            Log.e(TAG, "Error sending signal validation error", e);
         }
     }
 
@@ -104,19 +169,24 @@ public class WearEventsService extends WearableListenerService {
         Log.d(TAG, "Message received: " + path);
 
         switch (path) {
-            case PATH_START_RECORDING:
+            case WearableConstants.PATH_START_RECORDING:
                 Log.d(TAG, "Starting learning mode via broadcast");
                 broadcastToMainActivity(MainActivity.ACTION_START_LEARNING);
                 break;
 
-            case PATH_STOP_RECORDING:
+            case WearableConstants.PATH_STOP_RECORDING:
                 Log.d(TAG, "Stopping learning mode via broadcast");
                 broadcastToMainActivity(MainActivity.ACTION_STOP_LEARNING);
                 break;
 
-            case PATH_REQUEST_EMOTIONS:
+            case WearableConstants.PATH_REQUEST_EMOTIONS:
                 Log.d(TAG, "Emotions list requested");
                 sendAvailableEmotions();
+                break;
+
+            case WearableConstants.PATH_REQUEST_SUPPORTED_SIGNALS:
+                Log.d(TAG, "Supported signals requested");
+                sendSupportedSignals();
                 break;
 
             default:
@@ -165,10 +235,10 @@ public class WearEventsService extends WearableListenerService {
             Log.d(TAG, "Sending emotions list: " + emotions);
 
             // Create DataMap with emotions list
-            PutDataMapRequest putDataMapReq = PutDataMapRequest.create(PATH_AVAILABLE_EMOTIONS);
+            PutDataMapRequest putDataMapReq = PutDataMapRequest.create(WearableConstants.PATH_AVAILABLE_EMOTIONS);
             DataMap dataMap = putDataMapReq.getDataMap();
-            dataMap.putStringArrayList(KEY_EMOTIONS_LIST, emotions);
-            dataMap.putLong("timestamp", System.currentTimeMillis()); // Force update
+            dataMap.putStringArrayList(WearableConstants.KEY_EMOTIONS_LIST, emotions);
+            dataMap.putLong(WearableConstants.KEY_TIMESTAMP, System.currentTimeMillis()); // Force update
 
             PutDataRequest putDataReq = putDataMapReq.asPutDataRequest();
             putDataReq.setUrgent();
@@ -185,9 +255,78 @@ public class WearEventsService extends WearableListenerService {
         }
     }
 
+    /**
+     * Sends the list of supported alarm-stop signals to connected devices.
+     * Performs hardware validation and only sends signals that the device can support.
+     * If hardware is missing, sends an error response instead.
+     */
+    private void sendSupportedSignals() {
+        try {
+            // Initialize signal registry if needed
+            if (signalRegistry == null) {
+                signalRegistry = new SignalRegistry(this);
+            }
+
+            // Get supported signals (with hardware validation)
+            java.util.List<String> supportedSignals = signalRegistry.getSupportedSignals();
+            
+            Log.d(TAG, "Sending supported signals: " + supportedSignals);
+
+            // Create DataMap with signals list
+            PutDataMapRequest putDataMapReq = PutDataMapRequest.create(WearableConstants.PATH_SUPPORTED_SIGNALS);
+            DataMap dataMap = putDataMapReq.getDataMap();
+            
+            // Send as ArrayList for DataLayer compatibility
+            ArrayList<String> signalsList = new ArrayList<>(supportedSignals);
+            dataMap.putStringArrayList(WearableConstants.KEY_SIGNALS_LIST, signalsList);
+            
+            // Also send as JSON for more detailed response
+            String jsonResponse = signalRegistry.getSupportedSignalsAsJson();
+            dataMap.putString(WearableConstants.KEY_SIGNALS_JSON, jsonResponse);
+            
+            dataMap.putLong(WearableConstants.KEY_TIMESTAMP, System.currentTimeMillis()); // Force update
+
+            PutDataRequest putDataReq = putDataMapReq.asPutDataRequest();
+            putDataReq.setUrgent();
+
+            Task<DataItem> putDataTask = Wearable.getDataClient(this).putDataItem(putDataReq);
+            putDataTask.addOnSuccessListener(dataItem -> 
+                Log.d(TAG, "Supported signals sent successfully")
+            ).addOnFailureListener(e -> 
+                Log.e(TAG, "Failed to send supported signals", e)
+            );
+
+        } catch (Exception e) {
+            Log.e(TAG, "Error sending supported signals", e);
+            sendSignalRegistryError(e.getMessage());
+        }
+    }
+
+    /**
+     * Send an error response when the signal registry encounters an error.
+     */
+    private void sendSignalRegistryError(String errorMessage) {
+        try {
+            PutDataMapRequest putDataMapReq = PutDataMapRequest.create(WearableConstants.PATH_SUPPORTED_SIGNALS);
+            DataMap dataMap = putDataMapReq.getDataMap();
+            dataMap.putString("status", "error");
+            dataMap.putString("error_message", errorMessage != null ? errorMessage : "Unknown error");
+            dataMap.putLong(WearableConstants.KEY_TIMESTAMP, System.currentTimeMillis());
+
+            PutDataRequest putDataReq = putDataMapReq.asPutDataRequest();
+            putDataReq.setUrgent();
+
+            Wearable.getDataClient(this).putDataItem(putDataReq);
+        } catch (Exception e) {
+            Log.e(TAG, "Error sending signal registry error", e);
+        }
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
+        // Initialize signal registry
+        signalRegistry = new SignalRegistry(this);
         // Send emotions list when service starts
         sendAvailableEmotions();
     }

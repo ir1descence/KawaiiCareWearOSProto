@@ -41,6 +41,7 @@
             android:launchMode="singleTask"
             android:taskAffinity=""
             android:stateNotNeeded="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|keyboardHidden|uiMode"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

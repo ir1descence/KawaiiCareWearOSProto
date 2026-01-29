@@ -12,6 +12,9 @@ import android.graphics.PorterDuff;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.HashMap;
+import java.util.Map;
+
 import android.util.Log;
 
 /**
@@ -35,6 +38,9 @@ public class FaceCompositor {
     private BitmapFactory.Options options;
 
     private float scaleFactor = 1.0f;
+
+    // Cache for asset file listings to avoid expensive I/O on every frame
+    private final Map<String, String[]> assetFilesCache = new HashMap<>();
 
     public FaceCompositor(Context context, Face face, int width, int height) {
         this.context = context;
@@ -134,24 +140,36 @@ public class FaceCompositor {
         Point coord = face.getCoordinate(layerName);
         if (coord == null) return;
 
-        // Robust strategy: list available files in the asset dir and pick one using modulo
-        AssetManager am = context.getAssets();
-        try {
-            String[] files = am.list(dir);
-            if (files == null || files.length == 0) {
-                Log.w("FaceCompositor", "No files found in folder: " + dir);
-                return;
-            }
+        // Use cached file listing to avoid expensive I/O on every frame
+        String[] files = getAssetFiles(dir);
+        if (files == null || files.length == 0) {
+            Log.w("FaceCompositor", "No files found in folder: " + dir);
+            return;
+        }
 
-            // Choose file by index mod number of files, so missing 0.png vs 1.png is handled
-            String chosen = files[frameIndex % files.length];
-            String path = dir + "/" + chosen;
-            boolean success = drawLayerIsolate(path, coord);
-            if (!success) {
-                Log.w("FaceCompositor", "Failed to draw layer: " + path);
-            }
+        // Choose file by index mod number of files, so missing 0.png vs 1.png is handled
+        String chosen = files[frameIndex % files.length];
+        String path = dir + "/" + chosen;
+        boolean success = drawLayerIsolate(path, coord);
+        if (!success) {
+            Log.w("FaceCompositor", "Failed to draw layer: " + path);
+        }
+    }
+
+    /**
+     * Get asset files with caching to avoid repeated I/O operations.
+     */
+    private String[] getAssetFiles(String dir) {
+        if (assetFilesCache.containsKey(dir)) {
+            return assetFilesCache.get(dir);
+        }
+        try {
+            String[] files = context.getAssets().list(dir);
+            assetFilesCache.put(dir, files);
+            return files;
         } catch (IOException e) {
             Log.w("FaceCompositor", "Error listing assets for: " + dir, e);
+            return null;
         }
     }
 

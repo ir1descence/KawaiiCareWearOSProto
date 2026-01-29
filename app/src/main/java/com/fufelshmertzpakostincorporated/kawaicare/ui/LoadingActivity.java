@@ -6,6 +6,7 @@ import android.graphics.drawable.Animatable;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
 import android.view.View;
 import android.widget.ImageView;
 import android.widget.ProgressBar;
@@ -20,10 +21,20 @@ import com.fufelshmertzpakostincorporated.kawaicare.R;
  */
 public class LoadingActivity extends Activity {
 
+    // Timing constants
+    private static final long DISCOVERY_DELAY_MS = 10_000;
+    private static final long SUCCESS_DISPLAY_MS = 1_000;
+    private static final long FAILURE_DISPLAY_MS = 2_000;
+
     private ProgressBar progressBar;
     private ImageView ivCheck;
     private TextView tvStatus;
     private ConnectivityManager connectivityManager;
+
+    // Handler for scheduled tasks - prevents memory leaks
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private Runnable discoveryRunnable;
+    private Runnable finishRunnable;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -40,8 +51,8 @@ public class LoadingActivity extends Activity {
     }
 
     private void startDiscovery() {
-        // Mocking a slight delay to show the progress bar so user feels it "working"
-        new Handler().postDelayed(() -> {
+        // Using member handler to prevent memory leaks
+        discoveryRunnable = () -> {
             connectivityManager.checkConnectivity(new ConnectivityManager.ConnectionCallback() {
                 @Override
                 public void onConnectionResult(boolean isConnected, String nodeName) {
@@ -52,7 +63,8 @@ public class LoadingActivity extends Activity {
                     }
                 }
             });
-        }, 10000);
+        };
+        handler.postDelayed(discoveryRunnable, DISCOVERY_DELAY_MS);
     }
 
     private void onSuccess(String nodeName) {
@@ -67,11 +79,12 @@ public class LoadingActivity extends Activity {
                 ((Animatable) drawable).start();
             }
 
-            // Wait 2 seconds then finish
-            new Handler().postDelayed(() -> {
+            // Schedule finish with delay
+            finishRunnable = () -> {
                 setResult(Activity.RESULT_OK);
                 finish();
-            }, 1000);
+            };
+            handler.postDelayed(finishRunnable, SUCCESS_DISPLAY_MS);
         });
     }
 
@@ -80,11 +93,24 @@ public class LoadingActivity extends Activity {
             tvStatus.setText("No Phone Found");
             progressBar.setVisibility(View.GONE);
             
-            // Wait 2 seconds then finish canceled
-            new Handler().postDelayed(() -> {
+            // Schedule finish with delay
+            finishRunnable = () -> {
                 setResult(Activity.RESULT_CANCELED);
                 finish();
-            }, 2000);
+            };
+            handler.postDelayed(finishRunnable, FAILURE_DISPLAY_MS);
         });
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        // Clean up scheduled callbacks to prevent memory leaks
+        if (discoveryRunnable != null) {
+            handler.removeCallbacks(discoveryRunnable);
+        }
+        if (finishRunnable != null) {
+            handler.removeCallbacks(finishRunnable);
+        }
     }
 }

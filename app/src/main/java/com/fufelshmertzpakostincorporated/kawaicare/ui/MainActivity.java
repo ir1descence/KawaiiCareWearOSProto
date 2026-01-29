@@ -1,42 +1,81 @@
 package com.fufelshmertzpakostincorporated.kawaicare.ui;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.KeyguardManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Color;
+import android.os.Build;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
+import android.view.WindowManager;
 import android.widget.ImageView;
+import android.widget.Toast;
+import android.content.res.Configuration;
 
+import com.fufelshmertzpakostincorporated.kawaicare.R;
+import com.fufelshmertzpakostincorporated.kawaicare.alarm.AlarmManagerUtils;
+import com.fufelshmertzpakostincorporated.kawaicare.alarm.GestureMatcher;
+import com.fufelshmertzpakostincorporated.kawaicare.auth.SessionManager;
+import com.fufelshmertzpakostincorporated.kawaicare.data.AlarmStatusRepository;
 import com.fufelshmertzpakostincorporated.kawaicare.sensor.SensorController;
 import com.fufelshmertzpakostincorporated.kawaicare.recording.GestureRecordingController;
 import com.fufelshmertzpakostincorporated.kawaicare.animation.AnimationRenderer;
 import com.fufelshmertzpakostincorporated.kawaicare.animation.AnimationStateRepository;
+import com.google.android.gms.wearable.MessageClient;
+import com.google.android.gms.wearable.MessageEvent;
+import com.google.android.gms.wearable.Wearable;
 
 /**
  * Main Activity / Watch Face Home Launcher.
- * Coordinates Sensor Input, User Gestures, Learning Mode, and the Animation State Engine.
+ * Coordinates Sensor Input, User Gestures, Learning Mode, Alarm Handling, and the Animation State Engine.
+ * Implements authentication checking and guest mode support.
  */
 public class MainActivity extends Activity implements
         SensorController.SensorStateListener,
         AnimationStateRepository.AnimationStateListener,
-        GestureRecordingController.RecordingListener {
+        GestureRecordingController.RecordingListener,
+        AlarmStatusRepository.AlarmStatusListener,
+        AlarmManagerUtils.AlarmListener,
+        GestureMatcher.GestureMatchListener,
+        MessageClient.OnMessageReceivedListener {
+
+    private static final String TAG = "MainActivity";
 
     // Broadcast actions for Learning Mode
     public static final String ACTION_START_LEARNING = "com.fufelshmertzpakostincorporated.kawaicare.START_LEARNING";
     public static final String ACTION_STOP_LEARNING = "com.fufelshmertzpakostincorporated.kawaicare.STOP_LEARNING";
+
+    // Wearable Data Layer paths
+    private static final String MESSAGE_PATH_GESTURE_SYNC = "/gesture_sync";
+    private static final String MESSAGE_PATH_AUTH_UPDATE = "/auth_update";
 
     // Controllers
     private SensorController sensorController;
     private GestureRecordingController gestureRecordingController;
     private AnimationRenderer animationRenderer;
     private GestureDetector gestureDetector;
+    private SessionManager sessionManager;
+
+    // Alarm components
+    private AlarmManagerUtils alarmManagerUtils;
+    private GestureMatcher gestureMatcher;
+    private boolean isAlarmActive = false;
 
     // Views
     private ImageView imageView;
+
+    // Auth State
+    private boolean isGuestMode = true;
+    
+    // Animation Control Flags
+    private boolean isShakeAnimating = false;
+    private String currentAnimationFolder = null; // Track current folder to prevent redundant loads
 
     // Learning Mode state
     private AnimationRenderer.AnimState stateBeforeLearning;
@@ -62,17 +101,20 @@ public class MainActivity extends Activity implements
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        // 0. Initialize Session Manager and check auth state
+        sessionManager = SessionManager.getInstance(this);
+        checkAuthState();
+
+        setContentView(R.layout.activity_main);
+
         // 1. Setup Full Screen View
-        imageView = new ImageView(this);
-        imageView.setBackgroundColor(Color.BLACK);
-        imageView.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        setContentView(imageView);
+        imageView = findViewById(R.id.animation_image_view);
 
         // 2. Initialize Animation Subsystem
         animationRenderer = new AnimationRenderer(this, imageView);
         loadAssets();
 
-        // 3. Initialize Sensor Controller
+        // 3. Initialize Sensor Controller (ALWAYS active - works in guest mode)
         sensorController = new SensorController(this);
         sensorController.setListener(this);
 
@@ -83,15 +125,50 @@ public class MainActivity extends Activity implements
         // 5. Initialize Gesture Detector
         gestureDetector = new GestureDetector(this, new GestureListener());
 
-        // 6. Set screen dimensions once layout is complete
-        imageView.post(() -> 
-            gestureRecordingController.setScreenDimensions(imageView.getWidth(), imageView.getHeight())
-        );
+        // 6. Initialize Alarm Components
+        alarmManagerUtils = new AlarmManagerUtils(this);
+        alarmManagerUtils.setListener(this);
+        
+        gestureMatcher = new GestureMatcher(this);
+        gestureMatcher.setListener(this);
+
+        // 7. Set screen dimensions once layout is complete
+        imageView.post(() -> {
+            gestureRecordingController.setScreenDimensions(imageView.getWidth(), imageView.getHeight());
+            gestureMatcher.setScreenDimensions(imageView.getWidth(), imageView.getHeight());
+        });
+
+        // 8. Show guest mode indicator if not authenticated
+        if (isGuestMode) {
+            showGuestModeNotification();
+        }
+    }
+
+    /**
+     * Check authentication state and configure app accordingly.
+     */
+    private void checkAuthState() {
+        boolean isAuthenticated = sessionManager.isAuthenticated();
+        isGuestMode = !isAuthenticated;
+
+        if (isAuthenticated) {
+            Log.i(TAG, "User authenticated - enabling Wearable Data Layer");
+            // Wearable listeners will be enabled in onResume
+        } else {
+            Log.i(TAG, "Guest mode - Wearable Data Layer disabled");
+        }
+    }
+
+    /**
+     * Show a subtle notification that the app is in guest mode.
+     */
+    private void showGuestModeNotification() {
+        Toast.makeText(this, "Guest Mode - Pair with phone for full features", Toast.LENGTH_SHORT).show();
     }
 
     private void loadAssets() {
         // Initialize with default animation
-        animationRenderer.setFolderAnimation("wink", true);
+        animationRenderer.setFolderAnimation("wink_1", true);
         animationRenderer.setState(AnimationRenderer.AnimState.IDLE);
     }
 
@@ -100,7 +177,7 @@ public class MainActivity extends Activity implements
         String folderPath;
         switch (state) {
             case IDLE:
-                folderPath = "wink";
+                folderPath = "wink_2";
                 break;
             case TILTED:
                 folderPath = "turn_left";
@@ -112,17 +189,22 @@ public class MainActivity extends Activity implements
                 folderPath = "shake";
                 break;
             case ALARM:
-                folderPath = "turn_right";
+                folderPath = "notice";
                 break;
             case LEARNING:
                 folderPath = "turn_right";
                 break;
             default:
-                folderPath = "wink";
+                folderPath = "wink_1";
                 break;
         }
         
-        animationRenderer.setFolderAnimation(folderPath, true);
+        // Optimization: Only reload animation if folder actually changes
+        // This prevents redundant bitmap decoding which causes CPU spikes
+        if (!folderPath.equals(currentAnimationFolder)) {
+            currentAnimationFolder = folderPath;
+            animationRenderer.setFolderAnimation(folderPath, true);
+        }
         animationRenderer.setState(state);
     }
 
@@ -131,15 +213,49 @@ public class MainActivity extends Activity implements
     @Override
     protected void onResume() {
         super.onResume();
+        
+        // Sensor controller ALWAYS active (works in guest mode for local interactions)
         sensorController.start();
         animationRenderer.start();
         AnimationStateRepository.getInstance().addListener(this);
+
+        // Subscribe to Alarm Status Repository
+        AlarmStatusRepository.getInstance().addListener(this);
 
         // Register learning mode receiver
         IntentFilter filter = new IntentFilter();
         filter.addAction(ACTION_START_LEARNING);
         filter.addAction(ACTION_STOP_LEARNING);
         registerReceiver(learningModeReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+
+        // Enable Wearable Data Layer ONLY if authenticated
+        if (!isGuestMode) {
+            enableWearableListeners();
+        }
+
+        // Check if alarm was already on when activity resumed
+        if (AlarmStatusRepository.getInstance().isAlarmOn() && !isAlarmActive) {
+            handleAlarmActivation();
+        }
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        Log.i(TAG, "Configuration changed: orientation=" + newConfig.orientation + " uiMode=" + newConfig.uiMode);
+
+        // Update layout-dependent controllers with latest view measurements
+        if (imageView != null) {
+            imageView.post(() -> {
+                // Ensure the avatar remains visually upright — counter any system rotation
+                imageView.setRotation(0f);
+
+                gestureRecordingController.setScreenDimensions(imageView.getWidth(), imageView.getHeight());
+                gestureMatcher.setScreenDimensions(imageView.getWidth(), imageView.getHeight());
+                // Force animation engine to refresh frames for new size without restarting the Activity
+                animationRenderer.setState(animationRenderer.getCurrentState());
+            });
+        }
     }
 
     @Override
@@ -148,6 +264,12 @@ public class MainActivity extends Activity implements
         sensorController.stop();
         animationRenderer.stop();
         AnimationStateRepository.getInstance().removeListener(this);
+        AlarmStatusRepository.getInstance().removeListener(this);
+
+        // Disable Wearable listeners if they were enabled
+        if (!isGuestMode) {
+            disableWearableListeners();
+        }
 
         // Unregister receiver
         try {
@@ -159,18 +281,29 @@ public class MainActivity extends Activity implements
         if (gestureRecordingController.isRecording()) {
             gestureRecordingController.stopRecording(false);
         }
+
+        // Note: Don't stop alarm on pause - it should continue in background
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
         gestureRecordingController.release();
+        gestureMatcher.release();
+        alarmManagerUtils.release();
     }
 
     // --- Touch Handling ---
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        // Alarm mode: delegate to gesture matcher
+        if (isAlarmActive && gestureMatcher.isMatching()) {
+            boolean gestureMatched = gestureMatcher.onTouchEvent(event);
+            // Gesture matching will call onGestureMatched() if successful
+            return true;
+        }
+
         // Learning mode: delegate to gesture recording controller
         if (gestureRecordingController.isRecording()) {
             boolean shouldStop = gestureRecordingController.onTouchEvent(event);
@@ -212,6 +345,7 @@ public class MainActivity extends Activity implements
     @Override
     public void onTiltDetected(float zAxisValue) {
         if (gestureRecordingController.isRecording()) return;
+        if (isShakeAnimating) return; // Ignore tilt during shake animation
 
         if (animationRenderer.getCurrentState() == AnimationRenderer.AnimState.IDLE) {
             setAnimationForState(AnimationRenderer.AnimState.TILTED);
@@ -221,6 +355,7 @@ public class MainActivity extends Activity implements
     @Override
     public void onStable() {
         if (gestureRecordingController.isRecording()) return;
+        if (isShakeAnimating) return; // Ignore stable during shake animation
 
         if (animationRenderer.getCurrentState() == AnimationRenderer.AnimState.TILTED) {
             setAnimationForState(AnimationRenderer.AnimState.IDLE);
@@ -228,18 +363,42 @@ public class MainActivity extends Activity implements
     }
 
     @Override
-    public void onShake() {
+    public void onShakeStarted() {
         if (gestureRecordingController.isRecording()) return;
+        
+        Log.d(TAG, "Shake STARTED - triggering shake animation");
 
-        if (animationRenderer.getCurrentState() == AnimationRenderer.AnimState.IDLE) {
-            setAnimationForState(AnimationRenderer.AnimState.SHAKE);
-            
-            // Return to idle after shake animation
-            imageView.postDelayed(() -> {
-                if (animationRenderer.getCurrentState() == AnimationRenderer.AnimState.SHAKE) {
-                    setAnimationForState(AnimationRenderer.AnimState.IDLE);
-                }
-            }, 1000);
+        // If alarm is active and no custom gesture, shake stops the alarm
+        if (isAlarmActive && !gestureMatcher.hasCustomGesture()) {
+            Log.d(TAG, "Shake detected during alarm - stopping alarm");
+            dismissAlarm();
+            return;
+        }
+
+        // Start shake animation
+        isShakeAnimating = true;
+        setAnimationForState(AnimationRenderer.AnimState.SHAKE);
+    }
+    
+    @Override
+    public void onShakeContinuing() {
+        // Shake is still ongoing - animation continues
+        // No action needed, just keep the shake animation playing
+        Log.v(TAG, "Shake continuing...");
+    }
+    
+    @Override
+    public void onShakeEnded() {
+        if (!isShakeAnimating) return;
+        
+        Log.d(TAG, "Shake ENDED - returning to appropriate state");
+        isShakeAnimating = false;
+        
+        // Return to state based on current sensor reading
+        if (sensorController.isTilted()) {
+            setAnimationForState(AnimationRenderer.AnimState.TILTED);
+        } else {
+            setAnimationForState(AnimationRenderer.AnimState.IDLE);
         }
     }
 
@@ -267,11 +426,23 @@ public class MainActivity extends Activity implements
                 : AnimationRenderer.AnimState.IDLE;
         setAnimationForState(restoreState);
         stateBeforeLearning = null;
+
+        // If recording was successful, reload stored gesture for matching
+        if (success) {
+            gestureMatcher.reloadStoredGesture();
+            Toast.makeText(this, "Gesture saved! Use it to dismiss alarms.", Toast.LENGTH_SHORT).show();
+        }
     }
 
     // --- Learning Mode Control ---
 
     private void startLearningMode() {
+        // Check if this is a member-only feature
+        if (isGuestMode) {
+            showMemberOnlyDialog("Gesture Learning");
+            return;
+        }
+
         if (gestureRecordingController.isRecording()) return;
 
         // Save current state to restore later
@@ -293,5 +464,283 @@ public class MainActivity extends Activity implements
     public void onAlarmTriggered() {
         setAnimationForState(AnimationRenderer.AnimState.ALARM);
         imageView.postDelayed(() -> setAnimationForState(AnimationRenderer.AnimState.IDLE), 5000);
+    }
+
+    // --- AlarmStatusRepository.AlarmStatusListener ---
+
+    @Override
+    public void onAlarmStatusChanged(boolean isAlarmOn) {
+        Log.d(TAG, "Alarm status changed: " + isAlarmOn);
+        
+        runOnUiThread(() -> {
+            if (isAlarmOn) {
+                handleAlarmActivation();
+            } else {
+                handleAlarmDeactivation();
+            }
+        });
+    }
+
+    /**
+     * Handle alarm activation: wake screen, play sound, start gesture matching.
+     */
+    private void handleAlarmActivation() {
+        if (isAlarmActive) {
+            Log.w(TAG, "Alarm already active, ignoring activation");
+            return;
+        }
+
+        Log.d(TAG, "Activating alarm");
+        isAlarmActive = true;
+
+        // 1. Enable show when locked and keep screen on
+        enableAlarmScreenFlags();
+
+        // 2. Start alarm (sound + vibration)
+        alarmManagerUtils.startAlarm();
+
+        // 3. Set alarm animation state
+        setAnimationForState(AnimationRenderer.AnimState.ALARM);
+
+        // 4. Start gesture matching for dismissal
+        gestureMatcher.startMatching();
+
+        // Show toast about how to dismiss
+        if (gestureMatcher.hasCustomGesture()) {
+            Toast.makeText(this, "Perform your gesture to dismiss", Toast.LENGTH_SHORT).show();
+        } else {
+            Toast.makeText(this, "Shake to dismiss alarm", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /**
+     * Handle alarm deactivation: stop sound, release wakelock, restore UI.
+     */
+    private void handleAlarmDeactivation() {
+        if (!isAlarmActive) {
+            Log.w(TAG, "Alarm not active, ignoring deactivation");
+            return;
+        }
+
+        Log.d(TAG, "Deactivating alarm");
+        isAlarmActive = false;
+
+        // 1. Stop gesture matching
+        gestureMatcher.stopMatching();
+
+        // 2. Stop alarm (sound + vibration)
+        alarmManagerUtils.stopAlarm();
+
+        // 3. Clear screen flags
+        disableAlarmScreenFlags();
+
+        // 4. Return to happy/idle state
+        setAnimationForState(AnimationRenderer.AnimState.IDLE);
+
+        Toast.makeText(this, "Alarm dismissed", Toast.LENGTH_SHORT).show();
+    }
+
+    /**
+     * Dismiss the alarm by updating the repository.
+     * This triggers handleAlarmDeactivation() via the listener.
+     */
+    private void dismissAlarm() {
+        Log.d(TAG, "Dismissing alarm");
+        AlarmStatusRepository.getInstance().setAlarmStatus(false);
+    }
+
+    /**
+     * Enable window flags to show alarm screen when locked/dimmed.
+     */
+    private void enableAlarmScreenFlags() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            // Android 8.1+
+            setShowWhenLocked(true);
+            setTurnScreenOn(true);
+            
+            KeyguardManager keyguardManager = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+            if (keyguardManager != null) {
+                keyguardManager.requestDismissKeyguard(this, null);
+            }
+        } else {
+            // Legacy approach
+            getWindow().addFlags(
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD |
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            );
+        }
+        
+        Log.d(TAG, "Alarm screen flags enabled");
+    }
+
+    /**
+     * Disable alarm screen flags when alarm is dismissed.
+     */
+    private void disableAlarmScreenFlags() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(false);
+            setTurnScreenOn(false);
+        } else {
+            getWindow().clearFlags(
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD |
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON |
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            );
+        }
+        
+        Log.d(TAG, "Alarm screen flags disabled");
+    }
+
+    // --- AlarmManagerUtils.AlarmListener ---
+
+    @Override
+    public void onAlarmStarted() {
+        Log.d(TAG, "Alarm sound/vibration started");
+    }
+
+    @Override
+    public void onAlarmStopped() {
+        Log.d(TAG, "Alarm sound/vibration stopped");
+    }
+
+    @Override
+    public void onAlarmError(String message) {
+        Log.e(TAG, "Alarm error: " + message);
+        Toast.makeText(this, "Alarm error: " + message, Toast.LENGTH_SHORT).show();
+    }
+
+    // --- GestureMatcher.GestureMatchListener ---
+
+    @Override
+    public void onGestureMatched() {
+        Log.d(TAG, "Custom gesture matched - dismissing alarm");
+        dismissAlarm();
+    }
+
+    @Override
+    public void onShakeDetected() {
+        // This is called by GestureMatcher when shake is detected as fallback
+        Log.d(TAG, "Shake detected by GestureMatcher - dismissing alarm");
+        dismissAlarm();
+    }
+
+    @Override
+    public void onMatchingStarted() {
+        Log.d(TAG, "Gesture matching started");
+    }
+
+    @Override
+    public void onMatchingStopped() {
+        Log.d(TAG, "Gesture matching stopped");
+    }
+
+    // --- Wearable Data Layer Management ---
+
+    /**
+     * Enable Wearable Data Layer listeners for receiving updates from phone.
+     * Only called when user is authenticated.
+     */
+    private void enableWearableListeners() {
+        Wearable.getMessageClient(this).addListener(this);
+        Log.i(TAG, "Wearable Data Layer listeners enabled");
+    }
+
+    /**
+     * Disable Wearable Data Layer listeners.
+     */
+    private void disableWearableListeners() {
+        Wearable.getMessageClient(this).removeListener(this);
+        Log.i(TAG, "Wearable Data Layer listeners disabled");
+    }
+
+    /**
+     * Handle messages received from the phone via Wearable Data Layer.
+     * Only active when authenticated (not in guest mode).
+     */
+    @Override
+    public void onMessageReceived(MessageEvent messageEvent) {
+        String path = messageEvent.getPath();
+        byte[] data = messageEvent.getData();
+
+        Log.i(TAG, "Message received from phone: " + path);
+
+        switch (path) {
+            case MESSAGE_PATH_GESTURE_SYNC:
+                handleGestureSync(data);
+                break;
+            case MESSAGE_PATH_AUTH_UPDATE:
+                handleAuthUpdate(data);
+                break;
+            default:
+                Log.w(TAG, "Unknown message path: " + path);
+                break;
+        }
+    }
+
+    /**
+     * Handle gesture sync from phone (member-only feature).
+     */
+    private void handleGestureSync(byte[] data) {
+        // Parse and apply gesture data from phone
+        String gestureData = new String(data);
+        Log.i(TAG, "Gesture sync received: " + gestureData);
+        // TODO: Implement gesture parsing and application
+        Toast.makeText(this, "New gesture synced!", Toast.LENGTH_SHORT).show();
+    }
+
+    /**
+     * Handle authentication updates from phone.
+     */
+    private void handleAuthUpdate(byte[] data) {
+        String authToken = new String(data);
+        
+        if (authToken != null && !authToken.isEmpty()) {
+            // Save token and update auth state
+            sessionManager.saveAuthToken(authToken);
+            isGuestMode = false;
+            
+            // Enable Wearable listeners now that we're authenticated
+            enableWearableListeners();
+            
+            Toast.makeText(this, "Successfully paired with phone!", Toast.LENGTH_LONG).show();
+            Log.i(TAG, "Auth token received, guest mode disabled");
+        }
+    }
+
+    // --- Member-Only Feature Dialog ---
+
+    /**
+     * Show dialog when guest user tries to access member-only features.
+     * @param featureName The name of the feature being accessed
+     */
+    private void showMemberOnlyDialog(String featureName) {
+        new AlertDialog.Builder(this)
+                .setTitle("Pair with Phone Required")
+                .setMessage(featureName + " requires pairing with your phone. " +
+                        "Would you like to open settings to pair?")
+                .setPositiveButton("Open Settings", (dialog, which) -> {
+                    // Navigate to SettingsActivity
+                    Intent intent = new Intent(MainActivity.this, SettingsActivity.class);
+                    startActivity(intent);
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /**
+     * Public method to update auth state (can be called from SettingsActivity).
+     */
+    public void refreshAuthState() {
+        checkAuthState();
+        
+        // Re-enable or disable Wearable listeners based on new state
+        if (!isGuestMode) {
+            enableWearableListeners();
+        } else {
+            disableWearableListeners();
+        }
     }
 }
