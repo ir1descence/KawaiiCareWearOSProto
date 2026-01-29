@@ -61,6 +61,9 @@ dependencies {
     // Security - Encrypted SharedPreferences
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
+    // Core library for NotificationCompat (TCP Service)
+    implementation("androidx.core:core-ktx:1.12.0")
+
     // Unit testing
     testImplementation("junit:junit:4.13.2")
 }

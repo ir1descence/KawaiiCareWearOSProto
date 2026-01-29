@@ -9,6 +9,22 @@
 
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- Network permissions for TCP Socket Server -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+    <!-- Foreground service permission for persistent TCP server -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Alarm permissions -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+
     <uses-feature android:name="android.hardware.type.watch" />
     <uses-feature android:name="android.hardware.sensor.accelerometer" android:required="true" />
     <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />
@@ -82,6 +98,34 @@
             android:exported="false"
             android:taskAffinity=""
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
+        <!-- TCP Socket Server Service for non-Google device communication -->
+        <service
+            android:name=".network.TcpWearService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!-- Boot Receiver for rescheduling alarms after reboot -->
+        <receiver
+            android:name=".alarm.AlarmBootReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Alarm Trigger Receiver for when scheduled alarms fire -->
+        <receiver
+            android:name=".alarm.AlarmTriggerReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.fufelshmertzpakostincorporated.kawaicare.ALARM_TRIGGER" />
+            </intent-filter>
+        </receiver>
 
         
     </application>

@@ -8,13 +8,18 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
+import android.util.TypedValue;
 import android.view.GestureDetector;
+import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.WindowManager;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 import android.content.res.Configuration;
 
@@ -23,6 +28,7 @@ import com.fufelshmertzpakostincorporated.kawaicare.alarm.AlarmManagerUtils;
 import com.fufelshmertzpakostincorporated.kawaicare.alarm.GestureMatcher;
 import com.fufelshmertzpakostincorporated.kawaicare.auth.SessionManager;
 import com.fufelshmertzpakostincorporated.kawaicare.data.AlarmStatusRepository;
+import com.fufelshmertzpakostincorporated.kawaicare.network.TcpWearService;
 import com.fufelshmertzpakostincorporated.kawaicare.sensor.SensorController;
 import com.fufelshmertzpakostincorporated.kawaicare.recording.GestureRecordingController;
 import com.fufelshmertzpakostincorporated.kawaicare.animation.AnimationRenderer;
@@ -80,6 +86,9 @@ public class MainActivity extends Activity implements
     // Learning Mode state
     private AnimationRenderer.AnimState stateBeforeLearning;
 
+    // Pairing dialog
+    private AlertDialog pairingDialog = null;
+
     // Broadcast receiver for learning mode commands
     private final BroadcastReceiver learningModeReceiver = new BroadcastReceiver() {
         @Override
@@ -92,6 +101,32 @@ public class MainActivity extends Activity implements
                     break;
                 case ACTION_STOP_LEARNING:
                     stopLearningMode();
+                    break;
+            }
+        }
+    };
+
+    // Broadcast receiver for TCP pairing events
+    private final BroadcastReceiver pairingReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent == null || intent.getAction() == null) return;
+
+            switch (intent.getAction()) {
+                case TcpWearService.ACTION_SHOW_PAIRING_CODE:
+                    String code = intent.getStringExtra(TcpWearService.EXTRA_PAIRING_CODE);
+                    if (code != null) {
+                        showPairingCodeDialog(code);
+                    }
+                    break;
+                case TcpWearService.ACTION_DISMISS_PAIRING_CODE:
+                    dismissPairingCodeDialog();
+                    break;
+                case TcpWearService.ACTION_PAIRING_COMPLETE:
+                    onPairingComplete();
+                    break;
+                case TcpWearService.ACTION_REMOTE_LOGOUT:
+                    onRemoteLogout();
                     break;
             }
         }
@@ -166,6 +201,123 @@ public class MainActivity extends Activity implements
         Toast.makeText(this, "Guest Mode - Pair with phone for full features", Toast.LENGTH_SHORT).show();
     }
 
+    // =========================================
+    // TCP Pairing Dialog Methods
+    // =========================================
+
+    /**
+     * Show a dialog displaying the 6-digit pairing code.
+     * The user must read this code and enter it on the connecting device.
+     */
+    private void showPairingCodeDialog(String code) {
+        // Dismiss any existing dialog first
+        dismissPairingCodeDialog();
+
+        // Create a custom layout for the pairing code display
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setGravity(Gravity.CENTER);
+        layout.setPadding(32, 48, 32, 48);
+        layout.setBackgroundColor(Color.parseColor("#1A1A2E"));
+
+        // Title
+        TextView titleView = new TextView(this);
+        titleView.setText("Pairing Code");
+        titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        titleView.setTextColor(Color.WHITE);
+        titleView.setGravity(Gravity.CENTER);
+        layout.addView(titleView);
+
+        // Code display with spacing between digits
+        TextView codeView = new TextView(this);
+        StringBuilder formattedCode = new StringBuilder();
+        for (int i = 0; i < code.length(); i++) {
+            formattedCode.append(code.charAt(i));
+            if (i < code.length() - 1) {
+                formattedCode.append("  "); // Add spacing between digits
+            }
+        }
+        codeView.setText(formattedCode.toString());
+        codeView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 32);
+        codeView.setTextColor(Color.parseColor("#00FF88"));
+        codeView.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        codeView.setGravity(Gravity.CENTER);
+        codeView.setPadding(0, 24, 0, 24);
+        layout.addView(codeView);
+
+        // Instructions
+        TextView instructionView = new TextView(this);
+        instructionView.setText("Enter this code on your phone");
+        instructionView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        instructionView.setTextColor(Color.LTGRAY);
+        instructionView.setGravity(Gravity.CENTER);
+        layout.addView(instructionView);
+
+        // Build and show dialog
+        pairingDialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setView(layout)
+                .setCancelable(false)
+                .create();
+
+        // Make dialog non-dismissable
+        pairingDialog.setCanceledOnTouchOutside(false);
+
+        // Show the dialog
+        if (!isFinishing()) {
+            pairingDialog.show();
+        }
+
+        Log.d(TAG, "Pairing code dialog shown: " + code);
+    }
+
+    /**
+     * Dismiss the pairing code dialog if it's showing.
+     */
+    private void dismissPairingCodeDialog() {
+        if (pairingDialog != null && pairingDialog.isShowing()) {
+            pairingDialog.dismiss();
+            pairingDialog = null;
+            Log.d(TAG, "Pairing code dialog dismissed");
+        }
+    }
+
+    /**
+     * Called when pairing completes successfully.
+     * Updates the auth state and enables full features.
+     */
+    private void onPairingComplete() {
+        Log.i(TAG, "Pairing completed successfully");
+        
+        // Update auth state
+        isGuestMode = false;
+        
+        // Show success message
+        Toast.makeText(this, "Paired successfully!", Toast.LENGTH_SHORT).show();
+        
+        // Enable Wearable Data Layer now that we're authenticated
+        enableWearableListeners();
+    }
+
+    /**
+     * Called when the device is logged out remotely.
+     * Reverts to guest mode.
+     */
+    private void onRemoteLogout() {
+        Log.i(TAG, "Remote logout received");
+        
+        // Update auth state
+        isGuestMode = true;
+        
+        // Disable Wearable Data Layer
+        disableWearableListeners();
+        
+        // Show notification
+        Toast.makeText(this, "Logged out by remote device", Toast.LENGTH_SHORT).show();
+        
+        // Show guest mode notification
+        showGuestModeNotification();
+    }
+
     private void loadAssets() {
         // Initialize with default animation
         animationRenderer.setFolderAnimation("wink_1", true);
@@ -228,6 +380,14 @@ public class MainActivity extends Activity implements
         filter.addAction(ACTION_STOP_LEARNING);
         registerReceiver(learningModeReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
 
+        // Register TCP pairing receiver
+        IntentFilter pairingFilter = new IntentFilter();
+        pairingFilter.addAction(TcpWearService.ACTION_SHOW_PAIRING_CODE);
+        pairingFilter.addAction(TcpWearService.ACTION_DISMISS_PAIRING_CODE);
+        pairingFilter.addAction(TcpWearService.ACTION_PAIRING_COMPLETE);
+        pairingFilter.addAction(TcpWearService.ACTION_REMOTE_LOGOUT);
+        registerReceiver(pairingReceiver, pairingFilter, Context.RECEIVER_NOT_EXPORTED);
+
         // Enable Wearable Data Layer ONLY if authenticated
         if (!isGuestMode) {
             enableWearableListeners();
@@ -276,6 +436,15 @@ public class MainActivity extends Activity implements
             unregisterReceiver(learningModeReceiver);
         } catch (IllegalArgumentException ignored) {
         }
+
+        // Unregister pairing receiver
+        try {
+            unregisterReceiver(pairingReceiver);
+        } catch (IllegalArgumentException ignored) {
+        }
+
+        // Dismiss pairing dialog if showing
+        dismissPairingCodeDialog();
 
         // Stop recording if active
         if (gestureRecordingController.isRecording()) {
