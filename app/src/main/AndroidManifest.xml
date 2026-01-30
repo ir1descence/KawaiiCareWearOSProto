@@ -118,12 +118,12 @@
             </intent-filter>
         </receiver>
 
-        <!-- Alarm Trigger Receiver for when scheduled alarms fire -->
+        <!-- Event Trigger Receiver for when scheduled events fire -->
         <receiver
             android:name=".alarm.AlarmTriggerReceiver"
             android:exported="false">
             <intent-filter>
-                <action android:name="com.fufelshmertzpakostincorporated.kawaicare.ALARM_TRIGGER" />
+                <action android:name="com.fufelshmertzpakostincorporated.kawaicare.EVENT_TRIGGER" />
             </intent-filter>
         </receiver>
 

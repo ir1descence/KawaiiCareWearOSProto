@@ -3,6 +3,9 @@ package com.fufelshmertzpakostincorporated.kawaicare.network;
 import android.content.Context;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.util.Log;
 
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -27,10 +30,12 @@ public class NsdHelper {
 
     private final Context context;
     private final NsdManager nsdManager;
+    private final WifiManager wifiManager;
 
     // Registration state
     private final AtomicBoolean isRegistered = new AtomicBoolean(false);
     private final AtomicReference<String> registeredServiceName = new AtomicReference<>(null);
+    private int registeredPort = -1;
     
     // Listeners (held as instance variables to prevent garbage collection)
     private NsdManager.RegistrationListener registrationListener;
@@ -52,6 +57,13 @@ public class NsdHelper {
     public NsdHelper(Context context) {
         this.context = context.getApplicationContext();
         this.nsdManager = (NsdManager) context.getSystemService(Context.NSD_SERVICE);
+        this.wifiManager = (WifiManager) context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        
+        if (nsdManager == null) {
+            Log.e(TAG, "NsdManager is NULL - NSD will not work!");
+        } else {
+            Log.d(TAG, "NsdHelper initialized with NsdManager");
+        }
     }
 
     // =========================================
@@ -67,7 +79,7 @@ public class NsdHelper {
      */
     public void registerService(String serviceName, String serviceType, int port) {
         if (nsdManager == null) {
-            Log.e(TAG, "NsdManager not available");
+            Log.e(TAG, "NsdManager not available - cannot register service!");
             return;
         }
 
@@ -76,18 +88,76 @@ public class NsdHelper {
             unregisterService();
         }
 
+        // Log detailed registration info
+        Log.i(TAG, "╔══════════════════════════════════════════════════════════════");
+        Log.i(TAG, "║ NSD SERVICE REGISTRATION");
+        Log.i(TAG, "╠══════════════════════════════════════════════════════════════");
+        Log.i(TAG, "║ Service Name: " + serviceName);
+        Log.i(TAG, "║ Service Type: " + serviceType);
+        Log.i(TAG, "║ Port: " + port);
+        Log.i(TAG, "║ Device: " + Build.MODEL);
+        
+        // Log Wi-Fi info for debugging
+        if (wifiManager != null) {
+            WifiInfo wifiInfo = wifiManager.getConnectionInfo();
+            if (wifiInfo != null) {
+                int ipInt = wifiInfo.getIpAddress();
+                String ip = String.format("%d.%d.%d.%d",
+                        (ipInt & 0xff),
+                        (ipInt >> 8 & 0xff),
+                        (ipInt >> 16 & 0xff),
+                        (ipInt >> 24 & 0xff));
+                Log.i(TAG, "║ Wi-Fi SSID: " + wifiInfo.getSSID());
+                Log.i(TAG, "║ Wi-Fi IP: " + ip);
+                Log.i(TAG, "║ Wi-Fi RSSI: " + wifiInfo.getRssi() + " dBm");
+            } else {
+                Log.w(TAG, "║ Wi-Fi Info: Not available (null)");
+            }
+        } else {
+            Log.w(TAG, "║ WifiManager: Not available");
+        }
+        Log.i(TAG, "╚══════════════════════════════════════════════════════════════");
+
         // Create the service info
         NsdServiceInfo serviceInfo = new NsdServiceInfo();
         serviceInfo.setServiceName(serviceName);
         serviceInfo.setServiceType(serviceType);
         serviceInfo.setPort(port);
 
-        // Create registration listener
+        // Create registration listener with detailed logging
         registrationListener = new NsdManager.RegistrationListener() {
             @Override
             public void onRegistrationFailed(NsdServiceInfo serviceInfo, int errorCode) {
-                Log.e(TAG, "Service registration failed: " + errorCodeToString(errorCode));
+                String errorStr = errorCodeToString(errorCode);
+                Log.e(TAG, "╔══════════════════════════════════════════════════════════════");
+                Log.e(TAG, "║ ❌ NSD REGISTRATION FAILED!");
+                Log.e(TAG, "╠══════════════════════════════════════════════════════════════");
+                Log.e(TAG, "║ Error Code: " + errorCode + " (" + errorStr + ")");
+                Log.e(TAG, "║ Service Name: " + serviceInfo.getServiceName());
+                Log.e(TAG, "║ Service Type: " + serviceInfo.getServiceType());
+                Log.e(TAG, "║ Port: " + serviceInfo.getPort());
+                Log.e(TAG, "╠══════════════════════════════════════════════════════════════");
+                
+                // Provide troubleshooting hints
+                switch (errorCode) {
+                    case NsdManager.FAILURE_ALREADY_ACTIVE:
+                        Log.e(TAG, "║ HINT: Another service is already using this name or port.");
+                        Log.e(TAG, "║       Try using a unique service name.");
+                        break;
+                    case NsdManager.FAILURE_INTERNAL_ERROR:
+                        Log.e(TAG, "║ HINT: Internal error in NSD daemon. Try restarting Wi-Fi.");
+                        break;
+                    case NsdManager.FAILURE_MAX_LIMIT:
+                        Log.e(TAG, "║ HINT: Maximum number of NSD services reached.");
+                        break;
+                    default:
+                        Log.e(TAG, "║ HINT: Check Wi-Fi connection and multicast permissions.");
+                        break;
+                }
+                Log.e(TAG, "╚══════════════════════════════════════════════════════════════");
+                
                 isRegistered.set(false);
+                registeredPort = -1;
             }
 
             @Override
@@ -100,14 +170,24 @@ public class NsdHelper {
                 // The actual registered name may differ due to conflict resolution
                 String actualName = serviceInfo.getServiceName();
                 registeredServiceName.set(actualName);
+                registeredPort = port;
                 isRegistered.set(true);
-                Log.i(TAG, "Service registered successfully: " + actualName + 
-                        " on port " + port);
+                
+                Log.i(TAG, "╔══════════════════════════════════════════════════════════════");
+                Log.i(TAG, "║ ✅ NSD SERVICE REGISTERED SUCCESSFULLY!");
+                Log.i(TAG, "╠══════════════════════════════════════════════════════════════");
+                Log.i(TAG, "║ Registered Name: " + actualName);
+                Log.i(TAG, "║ Service Type: " + serviceType);
+                Log.i(TAG, "║ Port: " + port);
+                Log.i(TAG, "╠══════════════════════════════════════════════════════════════");
+                Log.i(TAG, "║ Clients should discover with type: " + serviceType);
+                Log.i(TAG, "╚══════════════════════════════════════════════════════════════");
             }
 
             @Override
             public void onServiceUnregistered(NsdServiceInfo serviceInfo) {
                 registeredServiceName.set(null);
+                registeredPort = -1;
                 isRegistered.set(false);
                 Log.i(TAG, "Service unregistered: " + serviceInfo.getServiceName());
             }
@@ -118,10 +198,9 @@ public class NsdHelper {
                     serviceInfo,
                     NsdManager.PROTOCOL_DNS_SD,
                     registrationListener);
-            Log.d(TAG, "Registering service: " + serviceName + " type: " + serviceType + 
-                    " port: " + port);
+            Log.d(TAG, "registerService() called - waiting for callback...");
         } catch (Exception e) {
-            Log.e(TAG, "Failed to register service", e);
+            Log.e(TAG, "Exception calling registerService()", e);
         }
     }
 
@@ -163,6 +242,14 @@ public class NsdHelper {
      */
     public String getRegisteredServiceName() {
         return registeredServiceName.get();
+    }
+
+    /**
+     * Get the registered port number.
+     * @return port number or -1 if not registered
+     */
+    public int getRegisteredPort() {
+        return isRegistered.get() ? registeredPort : -1;
     }
 
     // =========================================

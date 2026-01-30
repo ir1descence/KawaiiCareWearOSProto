@@ -52,7 +52,7 @@ public class AnimationRenderer {
     private volatile boolean isRunning = false;
     private int currentFrameIndex = 0;
 
-    // Optimization: Target ~20 FPS for battery efficiency on Wear OS
+    // Optimization: Target ~30 FPS for smooth animation on Wear OS
     private static final long FRAME_DELAY_MS = 33;
 
     // Legacy compositor mode
@@ -69,6 +69,22 @@ public class AnimationRenderer {
 
     // Track previous non-cached frame for memory management
     private Bitmap previousNonCachedFrame;
+    
+    // Track currently displayed bitmap to prevent recycling while in use
+    private volatile Bitmap currentlyDisplayedBitmap;
+    
+    // Lock for bitmap operations
+    private final Object bitmapLock = new Object();
+    
+    // Animation duration callback for external animation support
+    private AnimationDurationCallback durationCallback;
+    
+    /**
+     * Callback interface for notifying when animation duration is calculated.
+     */
+    public interface AnimationDurationCallback {
+        void onAnimationDurationCalculated(String folderPath, long durationMs, int frameCount);
+    }
 
     public AnimationRenderer(Context context, ImageView targetView) {
         this.context = context;
@@ -78,6 +94,60 @@ public class AnimationRenderer {
         loadingThread = new HandlerThread("AnimationLoader", android.os.Process.THREAD_PRIORITY_BACKGROUND);
         loadingThread.start();
         loadingHandler = new Handler(loadingThread.getLooper());
+    }
+    
+    /**
+     * Set callback for animation duration notifications.
+     */
+    public void setDurationCallback(AnimationDurationCallback callback) {
+        this.durationCallback = callback;
+    }
+    
+    /**
+     * Get the frame delay in milliseconds.
+     */
+    public static long getFrameDelayMs() {
+        return FRAME_DELAY_MS;
+    }
+    
+    /**
+     * Get the current frame count for the loaded animation.
+     * @return Number of frames, or 0 if no animation loaded
+     */
+    public int getFrameCount() {
+        return frameFiles.size();
+    }
+    
+    /**
+     * Calculate the duration of one full animation cycle in milliseconds.
+     * @return Duration in ms, or 0 if no animation loaded
+     */
+    public long getAnimationDurationMs() {
+        return frameFiles.size() * FRAME_DELAY_MS;
+    }
+    
+    /**
+     * Calculate the duration for a specific asset folder without loading it.
+     * @param assetsFolderPath Path to the assets folder
+     * @return Duration in ms, or 0 if folder not found or empty
+     */
+    public long calculateFolderDuration(String assetsFolderPath) {
+        try {
+            String[] files = context.getAssets().list(assetsFolderPath);
+            if (files != null) {
+                int imageCount = 0;
+                for (String file : files) {
+                    String lower = file.toLowerCase();
+                    if (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png")) {
+                        imageCount++;
+                    }
+                }
+                return imageCount * FRAME_DELAY_MS;
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return 0;
     }
 
     // Legacy mode setter
@@ -94,9 +164,41 @@ public class AnimationRenderer {
      * @param cacheFrames If true, preloads all frames into memory (faster but uses more RAM)
      */
     public void setFolderAnimation(String assetsFolderPath, boolean cacheFrames) {
-        // Skip if same folder already loaded
+        // Skip if same folder already loaded and cache is populated
         if (assetsFolderPath.equals(currentFolderPath) && !cachedFrames.isEmpty()) {
             return;
+        }
+        
+        // Stop animation loop briefly to prevent race conditions during transition
+        boolean wasRunning = isRunning;
+        if (wasRunning) {
+            handler.removeCallbacks(loop);
+        }
+        
+        synchronized (bitmapLock) {
+            // Clear the ImageView SYNCHRONOUSLY if on main thread before recycling bitmaps
+            // This is critical - async posting can cause the ImageView to draw a recycled bitmap
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                if (targetView != null) {
+                    targetView.setImageBitmap(null);
+                }
+            } else {
+                handler.post(() -> {
+                    if (targetView != null) {
+                        targetView.setImageBitmap(null);
+                    }
+                });
+            }
+            currentlyDisplayedBitmap = null;
+            
+            // Recycle old non-cached frame
+            if (previousNonCachedFrame != null && !previousNonCachedFrame.isRecycled()) {
+                previousNonCachedFrame.recycle();
+                previousNonCachedFrame = null;
+            }
+            
+            // Recycle old cached frames
+            recycleCachedFramesInternal();
         }
         
         this.mode = AnimationMode.FOLDER;
@@ -110,8 +212,19 @@ public class AnimationRenderer {
         
         loadFramesList();
         
+        // Notify callback of calculated duration
+        if (durationCallback != null && !frameFiles.isEmpty()) {
+            long duration = getAnimationDurationMs();
+            durationCallback.onAnimationDurationCalculated(assetsFolderPath, duration, frameFiles.size());
+        }
+        
         if (enableFrameCache) {
             preloadFramesAsync();
+        }
+        
+        // Resume animation loop if it was running
+        if (wasRunning) {
+            handler.post(loop);
         }
     }
 
@@ -173,8 +286,10 @@ public class AnimationRenderer {
             
             // Only update if still the same folder
             if (folderToLoad.equals(currentFolderPath)) {
-                cachedFrames.clear();
-                cachedFrames.addAll(loadedFrames);
+                synchronized (bitmapLock) {
+                    cachedFrames.clear();
+                    cachedFrames.addAll(loadedFrames);
+                }
             } else {
                 // Clean up since folder changed
                 for (Bitmap b : loadedFrames) {
@@ -190,7 +305,40 @@ public class AnimationRenderer {
         recycleCachedFrames();
     }
 
+    /**
+     * Recycle cached frames - clears ImageView first to prevent drawing recycled bitmaps.
+     * Thread-safe version that can be called from any thread.
+     */
     private void recycleCachedFrames() {
+        synchronized (bitmapLock) {
+            // Clear the ImageView SYNCHRONOUSLY if on main thread to prevent drawing recycled bitmaps
+            // This is critical - async posting can cause the ImageView to draw a recycled bitmap
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                if (targetView != null) {
+                    targetView.setImageBitmap(null);
+                }
+            } else {
+                // Not on main thread - post and wait
+                handler.post(() -> {
+                    if (targetView != null) {
+                        targetView.setImageBitmap(null);
+                    }
+                });
+            }
+            
+            recycleCachedFramesInternal();
+        }
+    }
+    
+    /**
+     * Internal method to recycle cached frames.
+     * MUST be called while holding bitmapLock.
+     */
+    private void recycleCachedFramesInternal() {
+        // Mark currently displayed bitmap as no longer in use
+        currentlyDisplayedBitmap = null;
+        
+        // Now safe to recycle
         for (Bitmap bitmap : cachedFrames) {
             if (bitmap != null && !bitmap.isRecycled()) {
                 bitmap.recycle();
@@ -284,31 +432,50 @@ public class AnimationRenderer {
 
         Bitmap frame = null;
         
-        // Try to get from cache first
-        if (enableFrameCache && currentFrameIndex < cachedFrames.size()) {
-            try {
-                frame = cachedFrames.get(currentFrameIndex);
-            } catch (IndexOutOfBoundsException e) {
-                // Cache might be clearing, will load on-demand below
+        synchronized (bitmapLock) {
+            // Try to get from cache first
+            if (enableFrameCache && currentFrameIndex < cachedFrames.size()) {
+                try {
+                    frame = cachedFrames.get(currentFrameIndex);
+                    // Verify the frame is still valid
+                    if (frame != null && frame.isRecycled()) {
+                        frame = null;
+                    }
+                } catch (IndexOutOfBoundsException e) {
+                    // Cache might be clearing, will load on-demand below
+                    frame = null;
+                }
             }
         }
         
         // If not cached or cache miss, load on-demand (but this should be rare with async preload)
-        if (frame == null || frame.isRecycled()) {
-            String framePath = currentFolderPath + "/" + frameFiles.get(currentFrameIndex);
+        if (frame == null) {
+            final String folderPath = currentFolderPath;
+            if (folderPath == null || currentFrameIndex >= frameFiles.size()) {
+                return; // Folder changed during iteration
+            }
+            
+            String framePath = folderPath + "/" + frameFiles.get(currentFrameIndex);
             frame = loadFrameFromAssets(framePath);
+            
+            if (frame == null) {
+                currentFrameIndex++;
+                return;
+            }
             
             // Store old frame reference before updating
             Bitmap oldFrame = previousNonCachedFrame;
             previousNonCachedFrame = frame;
             
-            if (frame != null && !frame.isRecycled()) {
-                targetView.setImageBitmap(frame);
-            }
+            // Update the currently displayed bitmap reference
+            currentlyDisplayedBitmap = frame;
+            
+            // Set the bitmap to ImageView
+            targetView.setImageBitmap(frame);
             
             // Only recycle the old frame AFTER setting new bitmap to ImageView
             // This prevents "Canvas: trying to use a recycled bitmap" crash
-            if (oldFrame != null && !oldFrame.isRecycled() && oldFrame != frame) {
+            if (oldFrame != null && !oldFrame.isRecycled() && oldFrame != frame && oldFrame != currentlyDisplayedBitmap) {
                 oldFrame.recycle();
             }
             
@@ -316,8 +483,16 @@ public class AnimationRenderer {
             return;
         }
 
-        if (frame != null && !frame.isRecycled()) {
-            targetView.setImageBitmap(frame);
+        // Using cached frame - update tracking and display
+        synchronized (bitmapLock) {
+            // Double-check frame is still valid (could have been recycled during folder transition)
+            if (frame != null && !frame.isRecycled()) {
+                currentlyDisplayedBitmap = frame;
+                // Final safety check before setting bitmap to prevent recycled bitmap crash
+                if (!frame.isRecycled()) {
+                    targetView.setImageBitmap(frame);
+                }
+            }
         }
 
         currentFrameIndex++;
@@ -345,16 +520,32 @@ public class AnimationRenderer {
     }
 
     /**
-     * Cleanup method to release resources
+     * Cleanup method to release resources.
+     * Should be called in onDestroy to prevent memory leaks.
      */
     public void release() {
         stop();
-        recycleCachedFrames();
-        // Recycle non-cached frame if exists
-        if (previousNonCachedFrame != null && !previousNonCachedFrame.isRecycled()) {
-            previousNonCachedFrame.recycle();
-            previousNonCachedFrame = null;
+        
+        synchronized (bitmapLock) {
+            // Clear ImageView first
+            handler.post(() -> {
+                if (targetView != null) {
+                    targetView.setImageBitmap(null);
+                }
+            });
+            
+            currentlyDisplayedBitmap = null;
+            
+            // Recycle cached frames
+            recycleCachedFramesInternal();
+            
+            // Recycle non-cached frame if exists
+            if (previousNonCachedFrame != null && !previousNonCachedFrame.isRecycled()) {
+                previousNonCachedFrame.recycle();
+                previousNonCachedFrame = null;
+            }
         }
+        
         // Shutdown loading thread
         if (loadingThread != null) {
             loadingThread.quitSafely();

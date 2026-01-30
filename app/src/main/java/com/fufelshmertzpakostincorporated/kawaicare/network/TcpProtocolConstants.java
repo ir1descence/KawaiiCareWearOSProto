@@ -170,13 +170,17 @@ public final class TcpProtocolConstants {
      * 
      * WearableConstants Path              -> TCP Command
      * -----------------------------------------------------------------
-     * PATH_ALARM_STATUS (/alarm_status)   -> CMD_SET_ALARM_STATUS
      * PATH_ANIMATION_STATE                -> CMD_SET_ANIMATION_STATE
      * PATH_ACTIVE_ALARM_GESTURE           -> CMD_SET_ACTIVE_GESTURE
      * PATH_START_RECORDING                -> CMD_START_RECORDING
      * PATH_STOP_RECORDING                 -> CMD_STOP_RECORDING
      * PATH_REQUEST_EMOTIONS               -> CMD_REQUEST_EMOTIONS
      * PATH_REQUEST_SUPPORTED_SIGNALS      -> CMD_REQUEST_SIGNALS
+     * 
+     * Event System:
+     * PATH_EVENTS_SYNC                    -> CMD_SYNC_EVENTS
+     * PATH_EVENT_TRIGGERED                -> RESP_EVENT_TRIGGERED (server-initiated)
+     * PATH_EVENT_DISMISSED                -> RESP_EVENT_DISMISSED (server-initiated)
      * 
      * Response Mapping:
      * PATH_AVAILABLE_EMOTIONS             -> RESP_EMOTIONS

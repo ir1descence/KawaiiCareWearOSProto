@@ -45,6 +45,7 @@ import com.google.android.gms.wearable.Wearable;
 public class MainActivity extends Activity implements
         SensorController.SensorStateListener,
         AnimationStateRepository.AnimationStateListener,
+        AnimationStateRepository.AnimationDurationProvider,
         GestureRecordingController.RecordingListener,
         AlarmStatusRepository.AlarmStatusListener,
         AlarmManagerUtils.AlarmListener,
@@ -56,6 +57,10 @@ public class MainActivity extends Activity implements
     // Broadcast actions for Learning Mode
     public static final String ACTION_START_LEARNING = "com.fufelshmertzpakostincorporated.kawaicare.START_LEARNING";
     public static final String ACTION_STOP_LEARNING = "com.fufelshmertzpakostincorporated.kawaicare.STOP_LEARNING";
+
+    // Broadcast actions for Event System
+    public static final String ACTION_EVENT_TRIGGERED = "com.fufelshmertzpakostincorporated.kawaicare.EVENT_TRIGGERED";
+    public static final String ACTION_EVENT_DISMISSED = "com.fufelshmertzpakostincorporated.kawaicare.EVENT_DISMISSED";
 
     // Wearable Data Layer paths
     private static final String MESSAGE_PATH_GESTURE_SYNC = "/gesture_sync";
@@ -82,6 +87,7 @@ public class MainActivity extends Activity implements
     // Animation Control Flags
     private boolean isShakeAnimating = false;
     private String currentAnimationFolder = null; // Track current folder to prevent redundant loads
+    private volatile boolean isExternalAnimationActive = false; // Blocks sensor input during TCP animations
 
     // Learning Mode state
     private AnimationRenderer.AnimState stateBeforeLearning;
@@ -89,7 +95,7 @@ public class MainActivity extends Activity implements
     // Pairing dialog
     private AlertDialog pairingDialog = null;
 
-    // Broadcast receiver for learning mode commands
+    // Broadcast receiver for learning mode commands and event system
     private final BroadcastReceiver learningModeReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -101,6 +107,18 @@ public class MainActivity extends Activity implements
                     break;
                 case ACTION_STOP_LEARNING:
                     stopLearningMode();
+                    break;
+                case ACTION_EVENT_TRIGGERED:
+                    String triggeredEventId = intent.getStringExtra("event_id");
+                    String eventType = intent.getStringExtra("event_type");
+                    Log.d(TAG, "Event triggered received: id=" + triggeredEventId + ", type=" + eventType);
+                    handleAlarmActivation();
+                    break;
+                case ACTION_EVENT_DISMISSED:
+                    String dismissedEventId = intent.getStringExtra("event_id");
+                    String dismissedBy = intent.getStringExtra("dismissed_by");
+                    Log.d(TAG, "Event dismissed received: id=" + dismissedEventId + ", by=" + dismissedBy);
+                    handleAlarmDeactivation();
                     break;
             }
         }
@@ -127,6 +145,12 @@ public class MainActivity extends Activity implements
                     break;
                 case TcpWearService.ACTION_REMOTE_LOGOUT:
                     onRemoteLogout();
+                    break;
+                case TcpWearService.ACTION_CONNECTIVITY_DIAGNOSTIC:
+                    String diagnosticInfo = intent.getStringExtra(TcpWearService.EXTRA_DIAGNOSTIC_INFO);
+                    if (diagnosticInfo != null) {
+                        showConnectivityDiagnostic(diagnosticInfo);
+                    }
                     break;
             }
         }
@@ -177,6 +201,23 @@ public class MainActivity extends Activity implements
         if (isGuestMode) {
             showGuestModeNotification();
         }
+
+        // 9. Start TCP Wear Service for network communication
+        startTcpWearService();
+    }
+
+    /**
+     * Start the TCP Wear Service for smartphone communication.
+     * The service runs as a foreground service to ensure it stays alive.
+     */
+    private void startTcpWearService() {
+        Intent serviceIntent = new Intent(this, TcpWearService.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent);
+        } else {
+            startService(serviceIntent);
+        }
+        Log.i(TAG, "TcpWearService started");
     }
 
     /**
@@ -318,6 +359,48 @@ public class MainActivity extends Activity implements
         showGuestModeNotification();
     }
 
+    /**
+     * Show connectivity diagnostic information in a dialog.
+     * Used for debugging NSD discovery issues.
+     */
+    private void showConnectivityDiagnostic(String diagnosticInfo) {
+        Log.i(TAG, "Showing connectivity diagnostic");
+        
+        // Create a scrollable text view for the diagnostic
+        android.widget.ScrollView scrollView = new android.widget.ScrollView(this);
+        scrollView.setPadding(16, 16, 16, 16);
+        
+        TextView textView = new TextView(this);
+        textView.setText(diagnosticInfo);
+        textView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
+        textView.setTextColor(Color.WHITE);
+        textView.setTypeface(Typeface.MONOSPACE);
+        textView.setBackgroundColor(Color.parseColor("#1A1A2E"));
+        textView.setPadding(16, 16, 16, 16);
+        
+        scrollView.addView(textView);
+        
+        AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Network Diagnostic")
+                .setView(scrollView)
+                .setPositiveButton("OK", null)
+                .create();
+        
+        if (!isFinishing()) {
+            dialog.show();
+        }
+    }
+
+    /**
+     * Trigger a connectivity diagnostic.
+     * Call this method to debug NSD discovery issues.
+     */
+    public void triggerConnectivityDiagnostic() {
+        Intent intent = new Intent(this, TcpWearService.class);
+        intent.setAction("com.fufelshmertzpakostincorporated.kawaicare.RUN_DIAGNOSTIC");
+        startService(intent);
+    }
+
     private void loadAssets() {
         // Initialize with default animation
         animationRenderer.setFolderAnimation("wink_1", true);
@@ -326,30 +409,7 @@ public class MainActivity extends Activity implements
 
     // Add this helper method to switch animations based on state
     private void setAnimationForState(AnimationRenderer.AnimState state) {
-        String folderPath;
-        switch (state) {
-            case IDLE:
-                folderPath = "wink_2";
-                break;
-            case TILTED:
-                folderPath = "turn_left";
-                break;
-            case GESTURE_ACTION:
-                folderPath = "nods";
-                break;
-            case SHAKE:
-                folderPath = "shake";
-                break;
-            case ALARM:
-                folderPath = "notice";
-                break;
-            case LEARNING:
-                folderPath = "turn_right";
-                break;
-            default:
-                folderPath = "wink_1";
-                break;
-        }
+        String folderPath = getFolderPathForState(state);
         
         // Optimization: Only reload animation if folder actually changes
         // This prevents redundant bitmap decoding which causes CPU spikes
@@ -370,6 +430,7 @@ public class MainActivity extends Activity implements
         sensorController.start();
         animationRenderer.start();
         AnimationStateRepository.getInstance().addListener(this);
+        AnimationStateRepository.getInstance().setDurationProvider(this);
 
         // Subscribe to Alarm Status Repository
         AlarmStatusRepository.getInstance().addListener(this);
@@ -378,6 +439,8 @@ public class MainActivity extends Activity implements
         IntentFilter filter = new IntentFilter();
         filter.addAction(ACTION_START_LEARNING);
         filter.addAction(ACTION_STOP_LEARNING);
+        filter.addAction(ACTION_EVENT_TRIGGERED);
+        filter.addAction(ACTION_EVENT_DISMISSED);
         registerReceiver(learningModeReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
 
         // Register TCP pairing receiver
@@ -386,6 +449,7 @@ public class MainActivity extends Activity implements
         pairingFilter.addAction(TcpWearService.ACTION_DISMISS_PAIRING_CODE);
         pairingFilter.addAction(TcpWearService.ACTION_PAIRING_COMPLETE);
         pairingFilter.addAction(TcpWearService.ACTION_REMOTE_LOGOUT);
+        pairingFilter.addAction(TcpWearService.ACTION_CONNECTIVITY_DIAGNOSTIC);
         registerReceiver(pairingReceiver, pairingFilter, Context.RECEIVER_NOT_EXPORTED);
 
         // Enable Wearable Data Layer ONLY if authenticated
@@ -492,12 +556,17 @@ public class MainActivity extends Activity implements
     private class GestureListener extends GestureDetector.SimpleOnGestureListener {
         @Override
         public boolean onDoubleTap(MotionEvent e) {
-            setAnimationForState(AnimationRenderer.AnimState.GESTURE_ACTION);
+            // Block if external animation is playing
+            if (isExternalAnimationActive) return true;
+            
+            AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.GESTURE_ACTION);
 
             // Revert to IDLE after 2 seconds
             imageView.postDelayed(() -> {
-                if (animationRenderer.getCurrentState() == AnimationRenderer.AnimState.GESTURE_ACTION) {
-                    setAnimationForState(AnimationRenderer.AnimState.IDLE);
+                // Only revert if still in GESTURE_ACTION (not overridden by TCP or sensor)
+                if (!isExternalAnimationActive && 
+                    animationRenderer.getCurrentState() == AnimationRenderer.AnimState.GESTURE_ACTION) {
+                    AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.IDLE);
                 }
             }, 2000);
 
@@ -516,9 +585,12 @@ public class MainActivity extends Activity implements
     public void onTiltDetected(float zAxisValue) {
         if (gestureRecordingController.isRecording()) return;
         if (isShakeAnimating) return; // Ignore tilt during shake animation
+        if (isExternalAnimationActive) return; // Ignore during TCP animation
 
         if (animationRenderer.getCurrentState() == AnimationRenderer.AnimState.IDLE) {
-            setAnimationForState(AnimationRenderer.AnimState.TILTED);
+            // Use setState directly on AnimationRenderer for local changes
+            // AnimationStateRepository.setState() will be blocked during external animations anyway
+            AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.TILTED);
         }
     }
 
@@ -526,15 +598,17 @@ public class MainActivity extends Activity implements
     public void onStable() {
         if (gestureRecordingController.isRecording()) return;
         if (isShakeAnimating) return; // Ignore stable during shake animation
+        if (isExternalAnimationActive) return; // Ignore during TCP animation
 
         if (animationRenderer.getCurrentState() == AnimationRenderer.AnimState.TILTED) {
-            setAnimationForState(AnimationRenderer.AnimState.IDLE);
+            AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.IDLE);
         }
     }
 
     @Override
     public void onShakeStarted() {
         if (gestureRecordingController.isRecording()) return;
+        if (isExternalAnimationActive) return; // Ignore during TCP animation
         
         Log.d(TAG, "Shake STARTED - triggering shake animation");
 
@@ -547,7 +621,7 @@ public class MainActivity extends Activity implements
 
         // Start shake animation
         isShakeAnimating = true;
-        setAnimationForState(AnimationRenderer.AnimState.SHAKE);
+        AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.SHAKE);
     }
     
     @Override
@@ -560,15 +634,16 @@ public class MainActivity extends Activity implements
     @Override
     public void onShakeEnded() {
         if (!isShakeAnimating) return;
+        if (isExternalAnimationActive) return; // Don't interfere with TCP animation
         
         Log.d(TAG, "Shake ENDED - returning to appropriate state");
         isShakeAnimating = false;
         
         // Return to state based on current sensor reading
         if (sensorController.isTilted()) {
-            setAnimationForState(AnimationRenderer.AnimState.TILTED);
+            AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.TILTED);
         } else {
-            setAnimationForState(AnimationRenderer.AnimState.IDLE);
+            AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.IDLE);
         }
     }
 
@@ -576,8 +651,75 @@ public class MainActivity extends Activity implements
 
     @Override
     public void onAnimationStateChanged(AnimationRenderer.AnimState state) {
+        Log.d(TAG, "Animation state changed to: " + state);
         if (imageView != null) {
             imageView.post(() -> setAnimationForState(state));
+        }
+    }
+
+    @Override
+    public void onExternalAnimationStarted() {
+        Log.i(TAG, "External (TCP) animation started - blocking sensor input");
+        isExternalAnimationActive = true;
+        // Clear shake state if we were mid-shake
+        isShakeAnimating = false;
+    }
+
+    @Override
+    public void onExternalAnimationEnded() {
+        Log.i(TAG, "External (TCP) animation ended - re-enabling sensor input");
+        isExternalAnimationActive = false;
+        
+        // Sync with current sensor state after external animation ends
+        // This ensures we don't get stuck in wrong state
+        if (sensorController != null && !gestureRecordingController.isRecording()) {
+            if (sensorController.isShaking()) {
+                // Unlikely but handle edge case
+                isShakeAnimating = true;
+            } else if (sensorController.isTilted()) {
+                // Sensor reports tilt, but we just returned to IDLE
+                // Let the next sensor event handle it naturally
+            }
+        }
+    }
+
+    // --- AnimationStateRepository.AnimationDurationProvider ---
+
+    @Override
+    public long getDurationForState(AnimationRenderer.AnimState state) {
+        // Map state to folder path (same mapping as setAnimationForState)
+        String folderPath = getFolderPathForState(state);
+        
+        // Calculate duration based on frame count
+        if (animationRenderer != null) {
+            long duration = animationRenderer.calculateFolderDuration(folderPath);
+            Log.d(TAG, "Calculated duration for " + state + " (" + folderPath + "): " + duration + "ms");
+            return duration;
+        }
+        
+        return 0; // Will use default fallback
+    }
+    
+    /**
+     * Get the asset folder path for a given animation state.
+     * Centralizes the state-to-folder mapping.
+     */
+    private String getFolderPathForState(AnimationRenderer.AnimState state) {
+        switch (state) {
+            case IDLE:
+                return "wink_2";
+            case TILTED:
+                return "turn_left";
+            case GESTURE_ACTION:
+                return "nods";
+            case SHAKE:
+                return "shake";
+            case ALARM:
+                return "notice";
+            case LEARNING:
+                return "turn_right";
+            default:
+                return "wink_1";
         }
     }
 
@@ -594,7 +736,7 @@ public class MainActivity extends Activity implements
         AnimationRenderer.AnimState restoreState = (stateBeforeLearning != null)
                 ? stateBeforeLearning
                 : AnimationRenderer.AnimState.IDLE;
-        setAnimationForState(restoreState);
+        AnimationStateRepository.getInstance().setState(restoreState);
         stateBeforeLearning = null;
 
         // If recording was successful, reload stored gesture for matching
@@ -614,12 +756,17 @@ public class MainActivity extends Activity implements
         }
 
         if (gestureRecordingController.isRecording()) return;
+        
+        // End any external animation first
+        if (isExternalAnimationActive) {
+            AnimationStateRepository.getInstance().endExternalAnimation();
+        }
 
         // Save current state to restore later
         stateBeforeLearning = animationRenderer.getCurrentState();
 
         // Switch to LEARNING emotion
-        setAnimationForState(AnimationRenderer.AnimState.LEARNING);
+        AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.LEARNING);
 
         // Start recording
         gestureRecordingController.startRecording();
@@ -632,8 +779,12 @@ public class MainActivity extends Activity implements
     // --- Alarm Trigger (for external use) ---
 
     public void onAlarmTriggered() {
-        setAnimationForState(AnimationRenderer.AnimState.ALARM);
-        imageView.postDelayed(() -> setAnimationForState(AnimationRenderer.AnimState.IDLE), 5000);
+        // End any external animation and force alarm state
+        if (isExternalAnimationActive) {
+            AnimationStateRepository.getInstance().endExternalAnimation();
+        }
+        AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.ALARM);
+        imageView.postDelayed(() -> AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.IDLE), 5000);
     }
 
     // --- AlarmStatusRepository.AlarmStatusListener ---
@@ -669,8 +820,10 @@ public class MainActivity extends Activity implements
         // 2. Start alarm (sound + vibration)
         alarmManagerUtils.startAlarm();
 
-        // 3. Set alarm animation state
-        setAnimationForState(AnimationRenderer.AnimState.ALARM);
+        // 3. Set alarm animation state - clear any external animation lock without
+        //    triggering an intermediate IDLE state change to prevent bitmap race condition
+        AnimationStateRepository.getInstance().clearExternalAnimationLock();
+        AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.ALARM);
 
         // 4. Start gesture matching for dismissal
         gestureMatcher.startMatching();
@@ -704,8 +857,8 @@ public class MainActivity extends Activity implements
         // 3. Clear screen flags
         disableAlarmScreenFlags();
 
-        // 4. Return to happy/idle state
-        setAnimationForState(AnimationRenderer.AnimState.IDLE);
+        // 4. Return to happy/idle state - use forceResetToIdle to clear any locks
+        AnimationStateRepository.getInstance().forceResetToIdle();
 
         Toast.makeText(this, "Alarm dismissed", Toast.LENGTH_SHORT).show();
     }

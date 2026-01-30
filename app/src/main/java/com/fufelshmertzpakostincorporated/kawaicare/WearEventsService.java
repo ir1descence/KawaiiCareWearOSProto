@@ -57,29 +57,39 @@ public class WearEventsService extends WearableListenerService {
             return;
         }
 
-        if (WearableConstants.PATH_ALARM_STATUS.equals(path)) {
-            DataMap dataMap = DataMapItem.fromDataItem(item).getDataMap();
-            String status = dataMap.getString(WearableConstants.KEY_ALARM_STATUS);
+        // Event-based paths
+        if (WearableConstants.PATH_EVENT_TRIGGERED.equals(path)) {
+            handleEventTriggered(item);
+            return;
+        }
 
-            Log.d(TAG, "Alarm status received: " + status);
-
-            if (status != null) {
-                boolean isAlarmOn = WearableConstants.ALARM_STATUS_ON.equalsIgnoreCase(status);
-                AlarmStatusRepository.getInstance().setAlarmStatus(isAlarmOn);
-            }
+        if (WearableConstants.PATH_EVENT_DISMISSED.equals(path)) {
+            handleEventDismissed(item);
             return;
         }
 
         if (WearableConstants.PATH_ANIMATION_STATE.equals(path)) {
             DataMap dataMap = DataMapItem.fromDataItem(item).getDataMap();
             String anim = dataMap.getString(WearableConstants.KEY_ANIM_STATE);
+            // Duration: 0 or missing = auto-calculate, >0 = explicit duration
+            long duration = dataMap.getLong(WearableConstants.KEY_ANIM_DURATION, 0);
 
-            Log.d(TAG, "Animation state received: " + anim);
+            Log.d(TAG, "Animation state received: " + anim + ", duration: " + (duration <= 0 ? "auto" : duration));
 
             if (anim != null) {
                 try {
                     AnimationRenderer.AnimState state = AnimationRenderer.AnimState.valueOf(anim.toUpperCase());
-                    AnimationStateRepository.getInstance().setState(state);
+                    // Use setExternalState for external (Wearable Data Layer) triggered animations
+                    // This will auto-return to IDLE after the duration and block sensor input
+                    if (state == AnimationRenderer.AnimState.IDLE) {
+                        AnimationStateRepository.getInstance().forceResetToIdle();
+                    } else if (duration <= 0) {
+                        // Auto-calculate duration from animation frame count
+                        AnimationStateRepository.getInstance().setExternalState(state);
+                    } else {
+                        // Explicit duration
+                        AnimationStateRepository.getInstance().setExternalState(state, duration);
+                    }
                 } catch (IllegalArgumentException e) {
                     Log.w(TAG, "Unknown animation state received: " + anim);
                 }
@@ -135,6 +145,68 @@ public class WearEventsService extends WearableListenerService {
         AlarmStatusRepository.getInstance().setActiveStopSignal(signal, customGesturePath);
         
         Log.d(TAG, "Active stop signal updated to: " + signal);
+    }
+
+    /**
+     * Handle event triggered notification from the Data Layer.
+     * This is called when an event (alarm or reminder) fires.
+     */
+    private void handleEventTriggered(DataItem item) {
+        DataMap dataMap = DataMapItem.fromDataItem(item).getDataMap();
+        String eventId = dataMap.getString(WearableConstants.KEY_EVENT_ID);
+        String eventType = dataMap.getString(WearableConstants.KEY_EVENT_TYPE);
+        String eventsJson = dataMap.getString(WearableConstants.KEY_EVENTS_JSON);
+
+        Log.d(TAG, "Event triggered: id=" + eventId + ", type=" + eventType);
+
+        if (eventId == null || eventId.isEmpty()) {
+            Log.w(TAG, "Event triggered with no event ID");
+            return;
+        }
+
+        // Update alarm status to ON when an event triggers
+        AlarmStatusRepository.getInstance().setAlarmStatus(true);
+
+        // Broadcast to MainActivity to handle the event
+        Intent intent = new Intent(MainActivity.ACTION_EVENT_TRIGGERED);
+        intent.setPackage(getPackageName());
+        intent.putExtra("event_id", eventId);
+        intent.putExtra("event_type", eventType);
+        if (eventsJson != null) {
+            intent.putExtra("event_json", eventsJson);
+        }
+        sendBroadcast(intent);
+
+        Log.i(TAG, "Event triggered broadcast sent for: " + eventId);
+    }
+
+    /**
+     * Handle event dismissed notification from the Data Layer.
+     * This is called when an event is dismissed (user performed termination signal).
+     */
+    private void handleEventDismissed(DataItem item) {
+        DataMap dataMap = DataMapItem.fromDataItem(item).getDataMap();
+        String eventId = dataMap.getString(WearableConstants.KEY_EVENT_ID);
+        String dismissedBy = dataMap.getString(WearableConstants.KEY_DISMISSED_BY);
+
+        Log.d(TAG, "Event dismissed: id=" + eventId + ", by=" + dismissedBy);
+
+        if (eventId == null || eventId.isEmpty()) {
+            Log.w(TAG, "Event dismissed with no event ID");
+            return;
+        }
+
+        // Update alarm status to OFF when event is dismissed
+        AlarmStatusRepository.getInstance().setAlarmStatus(false);
+
+        // Broadcast to MainActivity to handle the dismissal
+        Intent intent = new Intent(MainActivity.ACTION_EVENT_DISMISSED);
+        intent.setPackage(getPackageName());
+        intent.putExtra("event_id", eventId);
+        intent.putExtra("dismissed_by", dismissedBy != null ? dismissedBy : WearableConstants.DISMISSED_BY_MANUAL);
+        sendBroadcast(intent);
+
+        Log.i(TAG, "Event dismissed broadcast sent for: " + eventId);
     }
 
     /**

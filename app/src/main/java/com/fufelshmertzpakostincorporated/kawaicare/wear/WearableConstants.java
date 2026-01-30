@@ -14,11 +14,21 @@ public final class WearableConstants {
     // Data Layer Paths
     // ===========================================
 
-    /** Path for alarm status data */
-    public static final String PATH_ALARM_STATUS = "/alarm_status";
-
     /** Path for animation state data */
     public static final String PATH_ANIMATION_STATE = "/animation_state";
+
+    // ===========================================
+    // Event System Paths (New Architecture)
+    // ===========================================
+
+    /** Path for scheduled events sync */
+    public static final String PATH_EVENTS_SYNC = "/events_sync";
+
+    /** Path for event triggered notification */
+    public static final String PATH_EVENT_TRIGGERED = "/event_triggered";
+
+    /** Path for event dismissed notification */
+    public static final String PATH_EVENT_DISMISSED = "/event_dismissed";
 
     /** Path for available emotions list */
     public static final String PATH_AVAILABLE_EMOTIONS = "/available_emotions";
@@ -36,11 +46,27 @@ public final class WearableConstants {
     // Data Layer Keys
     // ===========================================
 
-    /** Key for alarm status value */
-    public static final String KEY_ALARM_STATUS = "key_alarm_status";
-
     /** Key for animation state value */
     public static final String KEY_ANIM_STATE = "key_animation_state";
+
+    // ===========================================
+    // Event System Keys
+    // ===========================================
+
+    /** Key for event ID */
+    public static final String KEY_EVENT_ID = "key_event_id";
+
+    /** Key for event type (ALARM or REMINDER) */
+    public static final String KEY_EVENT_TYPE = "key_event_type";
+
+    /** Key for events JSON array */
+    public static final String KEY_EVENTS_JSON = "key_events_json";
+
+    /** Key for dismissed by reason */
+    public static final String KEY_DISMISSED_BY = "key_dismissed_by";
+
+    /** Key for animation duration in milliseconds */
+    public static final String KEY_ANIM_DURATION = "key_animation_duration";
 
     /** Key for emotions list */
     public static final String KEY_EMOTIONS_LIST = "key_emotions_list";
@@ -80,12 +106,21 @@ public final class WearableConstants {
     public static final String PATH_RECORDING_FAILED = "/recording_failed";
 
     // ===========================================
-    // Alarm Status Values
+    // Event System Values
     // ===========================================
 
-    /** Alarm is active */
-    public static final String ALARM_STATUS_ON = "ON";
+    /** Event type: Alarm */
+    public static final String EVENT_TYPE_ALARM = "ALARM";
 
-    /** Alarm is inactive */
-    public static final String ALARM_STATUS_OFF = "OFF";
+    /** Event type: Reminder */
+    public static final String EVENT_TYPE_REMINDER = "REMINDER";
+
+    /** Dismissed by gesture */
+    public static final String DISMISSED_BY_GESTURE = "gesture";
+
+    /** Dismissed by timeout */
+    public static final String DISMISSED_BY_TIMEOUT = "timeout";
+
+    /** Dismissed manually */
+    public static final String DISMISSED_BY_MANUAL = "manual";
 }

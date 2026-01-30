@@ -4,24 +4,41 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkInfo;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.util.Log;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
+
 import com.fufelshmertzpakostincorporated.kawaicare.R;
-import com.fufelshmertzpakostincorporated.kawaicare.alarm.Alarm;
 import com.fufelshmertzpakostincorporated.kawaicare.alarm.SignalRegistry;
-import com.fufelshmertzpakostincorporated.kawaicare.alarm.WearAlarmScheduler;
 import com.fufelshmertzpakostincorporated.kawaicare.animation.AnimationRenderer;
 import com.fufelshmertzpakostincorporated.kawaicare.animation.AnimationStateRepository;
 import com.fufelshmertzpakostincorporated.kawaicare.auth.SessionManager;
 import com.fufelshmertzpakostincorporated.kawaicare.data.AlarmStatusRepository;
+import com.fufelshmertzpakostincorporated.kawaicare.event.EventPayload;
+import com.fufelshmertzpakostincorporated.kawaicare.event.EventRepository;
+import com.fufelshmertzpakostincorporated.kawaicare.event.EventScheduler;
+import com.fufelshmertzpakostincorporated.kawaicare.event.Recurrence;
+import com.fufelshmertzpakostincorporated.kawaicare.event.ScheduledEvent;
 import com.fufelshmertzpakostincorporated.kawaicare.ui.MainActivity;
 
 import org.json.JSONArray;
@@ -98,11 +115,13 @@ public class TcpWearService extends Service {
     public static final String PAIR_STEP_CHALLENGE = "challenge";
     public static final String PAIR_STEP_VERIFY = "verify";
 
-    // Authorized Commands (require valid token)
-    public static final String CMD_SET_ALARM = "set_alarm";
-    public static final String CMD_DELETE_ALARM = "delete_alarm";
-    public static final String CMD_GET_ALARMS = "get_alarms";
-    public static final String CMD_SET_ALARM_STATUS = "set_alarm_status";
+    // New Event-based Commands (v2.0)
+    public static final String CMD_SYNC_EVENTS = "sync_events";
+    public static final String CMD_UPDATE_EVENT = "update_event";
+    public static final String CMD_GET_EVENTS = "get_events";
+    public static final String CMD_DELETE_EVENT = "delete_event";
+
+    // Animation and gesture commands
     public static final String CMD_SET_ANIMATION_STATE = "set_animation_state";
     public static final String CMD_SET_ACTIVE_GESTURE = "set_active_gesture";
     public static final String CMD_START_RECORDING = "start_recording";
@@ -121,16 +140,20 @@ public class TcpWearService extends Service {
     public static final String RESP_VALIDATION_ERROR = "validation_error";
     public static final String RESP_PONG = "pong";
     public static final String RESP_STATUS = "status";
-    public static final String RESP_ALARM_CREATED = "alarm_created";
-    public static final String RESP_ALARM_UPDATED = "alarm_updated";
-    public static final String RESP_ALARM_DELETED = "alarm_deleted";
-    public static final String RESP_ALARMS_LIST = "alarms_list";
     public static final String RESP_AUTH_STATUS = "auth_status";
     public static final String RESP_PAIRING_CHALLENGE = "pairing_challenge";
     public static final String RESP_PAIRING_SUCCESS = "pairing_success";
     public static final String RESP_PAIRING_FAILED = "pairing_failed";
     public static final String RESP_LOGOUT_SUCCESS = "logout_success";
     public static final String RESP_UNAUTHORIZED = "unauthorized";
+    
+    // New Event Response Types (v2.0)
+    public static final String RESP_EVENTS_SYNCED = "events_synced";
+    public static final String RESP_EVENT_UPDATED = "event_updated";
+    public static final String RESP_EVENTS_LIST = "events_list";
+    public static final String RESP_EVENT_DELETED = "event_deleted";
+    public static final String RESP_EVENT_TRIGGERED = "event_triggered";
+    public static final String RESP_EVENT_DISMISSED = "event_dismissed";
 
     // =========================================
     // Broadcast Actions for MainActivity
@@ -152,8 +175,15 @@ public class TcpWearService extends Service {
     public static final String ACTION_REMOTE_LOGOUT = 
             "com.fufelshmertzpakostincorporated.kawaicare.REMOTE_LOGOUT";
 
+    /** Broadcast action for connectivity diagnostic results */
+    public static final String ACTION_CONNECTIVITY_DIAGNOSTIC = 
+            "com.fufelshmertzpakostincorporated.kawaicare.CONNECTIVITY_DIAGNOSTIC";
+
     /** Extra key for pairing code */
     public static final String EXTRA_PAIRING_CODE = "pairing_code";
+
+    /** Extra key for diagnostic info */
+    public static final String EXTRA_DIAGNOSTIC_INFO = "diagnostic_info";
 
     // Server components
     private ServerSocket serverSocket;
@@ -161,6 +191,12 @@ public class TcpWearService extends Service {
     private final AtomicBoolean isRunning = new AtomicBoolean(false);
     private Thread serverThread;
     private NsdHelper nsdHelper;
+
+    // Power and Wi-Fi management (critical for Wear OS)
+    private PowerManager.WakeLock wakeLock;
+    private WifiManager.WifiLock wifiLock;
+    private WifiManager wifiManager;
+    private ConnectivityManager connectivityManager;
 
     // Connected clients tracking
     private final CopyOnWriteArrayList<ClientConnection> connectedClients = new CopyOnWriteArrayList<>();
@@ -176,9 +212,12 @@ public class TcpWearService extends Service {
 
     // Signal Registry (lazy initialized)
     private SignalRegistry signalRegistry;
-
-    // Alarm Scheduler
-    private WearAlarmScheduler alarmScheduler;
+    
+    // Event Scheduler (v2.0 - unified event system)
+    private EventScheduler eventScheduler;
+    
+    // Event Repository (v2.0)
+    private EventRepository eventRepository;
 
     // Session Manager for authentication
     private SessionManager sessionManager;
@@ -199,12 +238,16 @@ public class TcpWearService extends Service {
         // Initialize SessionManager
         sessionManager = SessionManager.getInstance(this);
 
+        // Initialize power and Wi-Fi management
+        initializePowerManagement();
+
         // Initialize SignalRegistry
         signalRegistry = new SignalRegistry(this);
-
-        // Initialize Alarm Scheduler
-        alarmScheduler = WearAlarmScheduler.getInstance(this);
-        alarmScheduler.initialize();
+        
+        // Initialize Event Scheduler and Repository (v2.0)
+        eventRepository = EventRepository.getInstance(this);
+        eventScheduler = EventScheduler.getInstance(this);
+        eventScheduler.initialize();
 
         // Initialize NSD Helper
         nsdHelper = new NsdHelper(this);
@@ -213,9 +256,20 @@ public class TcpWearService extends Service {
         createNotificationChannel();
     }
 
+    /** Intent action to run connectivity diagnostic */
+    public static final String ACTION_RUN_DIAGNOSTIC = 
+            "com.fufelshmertzpakostincorporated.kawaicare.RUN_DIAGNOSTIC";
+
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         Log.d(TAG, "TcpWearService onStartCommand");
+
+        // Check for diagnostic request
+        if (intent != null && ACTION_RUN_DIAGNOSTIC.equals(intent.getAction())) {
+            Log.d(TAG, "Running connectivity diagnostic on request");
+            runConnectivityDiagnostic();
+            return START_STICKY;
+        }
 
         // Start as foreground service
         String statusText = sessionManager.isAuthenticated() 
@@ -237,6 +291,15 @@ public class TcpWearService extends Service {
     }
 
     @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        Log.d(TAG, "TcpWearService onTaskRemoved - cleaning up server resources");
+        // Clean up server resources when app is swiped away
+        // This helps prevent port binding issues on restart
+        stopServer();
+        super.onTaskRemoved(rootIntent);
+    }
+
+    @Override
     public void onDestroy() {
         Log.d(TAG, "TcpWearService onDestroy");
         stopServer();
@@ -249,6 +312,7 @@ public class TcpWearService extends Service {
 
     /**
      * Start the TCP server on the specified port.
+     * Handles port conflicts gracefully with retry logic.
      */
     private void startServer(int port) {
         if (isRunning.get()) {
@@ -256,58 +320,140 @@ public class TcpWearService extends Service {
             return;
         }
 
+        // Check Wi-Fi connectivity before starting
+        if (!isWifiConnected()) {
+            Log.e(TAG, "Wi-Fi is not connected. Cannot start NSD service.");
+            updateNotification("Wi-Fi not connected");
+            // Still start the server, but log the warning
+        } else {
+            Log.i(TAG, "Wi-Fi is connected. Proceeding with server startup.");
+        }
+
+        // Acquire power and Wi-Fi locks to prevent sleep
+        acquireLocks();
+
         connectionPool = Executors.newFixedThreadPool(CONNECTION_POOL_SIZE);
 
         serverThread = new Thread(() -> {
-            try {
-                serverSocket = new ServerSocket(port);
-                serverSocket.setReuseAddress(true);
-                isRunning.set(true);
+            int maxRetries = 3;
+            int retryDelayMs = 1000;
+            
+            for (int attempt = 1; attempt <= maxRetries; attempt++) {
+                try {
+                    // Bind to all interfaces (0.0.0.0) to ensure accessibility
+                    serverSocket = new ServerSocket();
+                    serverSocket.setReuseAddress(true);
+                    serverSocket.bind(new InetSocketAddress("0.0.0.0", port));
+                    isRunning.set(true);
 
-                int actualPort = serverSocket.getLocalPort();
-                Log.i(TAG, "TCP Server started on port " + actualPort);
+                    int actualPort = serverSocket.getLocalPort();
+                    String localIp = getLocalIpAddress();
+                    Log.i(TAG, "TCP Server started on 0.0.0.0:" + actualPort + " (local IP: " + localIp + ")");
 
-                // Update notification
-                String statusText = sessionManager.isAuthenticated() 
-                        ? "Authenticated - Port " + actualPort
-                        : "Not paired - Port " + actualPort;
-                updateNotification(statusText);
+                    // Update notification
+                    String statusText = sessionManager.isAuthenticated() 
+                            ? "Authenticated - Port " + actualPort
+                            : "Not paired - Port " + actualPort;
+                    updateNotification(statusText);
 
-                // Register NSD service
-                nsdHelper.registerService(SERVICE_NAME, SERVICE_TYPE, actualPort);
+                    // Register NSD service with unique name
+                    String uniqueServiceName = SERVICE_NAME + "-" + Build.MODEL.replace(" ", "_");
+                    nsdHelper.registerService(uniqueServiceName, SERVICE_TYPE, actualPort);
 
-                // Accept connections loop
-                while (isRunning.get() && !serverSocket.isClosed()) {
-                    try {
-                        Socket clientSocket = serverSocket.accept();
-                        Log.d(TAG, "New client connection from: " + 
-                                clientSocket.getInetAddress().getHostAddress());
-                        
-                        // Configure socket
-                        clientSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
-                        clientSocket.setKeepAlive(true);
-                        clientSocket.setTcpNoDelay(true);
+                    // Accept connections loop
+                    while (isRunning.get() && !serverSocket.isClosed()) {
+                        try {
+                            Socket clientSocket = serverSocket.accept();
+                            Log.d(TAG, "New client connection from: " + 
+                                    clientSocket.getInetAddress().getHostAddress());
+                            
+                            // Configure socket
+                            clientSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
+                            clientSocket.setKeepAlive(true);
+                            clientSocket.setTcpNoDelay(true);
 
-                        // Handle in thread pool
-                        ClientConnection connection = new ClientConnection(clientSocket);
-                        connectedClients.add(connection);
-                        connectionPool.submit(connection);
+                            // Handle in thread pool
+                            ClientConnection connection = new ClientConnection(clientSocket);
+                            connectedClients.add(connection);
+                            connectionPool.submit(connection);
 
-                    } catch (SocketException e) {
-                        if (isRunning.get()) {
-                            Log.e(TAG, "Socket accept error", e);
+                        } catch (SocketException e) {
+                            if (isRunning.get()) {
+                                Log.e(TAG, "Socket accept error", e);
+                            }
                         }
                     }
+                    
+                    // If we get here normally (isRunning became false), exit the retry loop
+                    break;
+                    
+                } catch (java.net.BindException e) {
+                    // Port is already in use - likely from a previous instance
+                    Log.w(TAG, "Port " + port + " already in use (attempt " + attempt + "/" + maxRetries + ")");
+                    
+                    if (attempt < maxRetries) {
+                        Log.i(TAG, "Waiting " + retryDelayMs + "ms before retry...");
+                        try {
+                            Thread.sleep(retryDelayMs);
+                            // Increase delay for next attempt
+                            retryDelayMs *= 2;
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
+                    } else {
+                        Log.e(TAG, "Failed to bind to port " + port + " after " + maxRetries + " attempts");
+                        updateNotification("Port unavailable - restart app");
+                    }
+                } catch (IOException e) {
+                    Log.e(TAG, "Server error", e);
+                    updateNotification("Server error: " + e.getMessage());
+                    break; // Don't retry on other IO errors
                 }
-            } catch (IOException e) {
-                Log.e(TAG, "Server error", e);
-                updateNotification("Server error: " + e.getMessage());
-            } finally {
-                isRunning.set(false);
             }
+            
+            isRunning.set(false);
         }, "TcpWearServer");
 
         serverThread.start();
+    }
+
+    /**
+     * Refresh NSD registration to ensure discoverability.
+     * This is useful after logout or when NSD may have become stale.
+     * Unregisters and re-registers the service with a fresh mDNS announcement.
+     */
+    private void refreshNsdRegistration() {
+        if (nsdHelper == null || serverSocket == null || serverSocket.isClosed()) {
+            Log.w(TAG, "Cannot refresh NSD: helper or server socket not available");
+            return;
+        }
+
+        int port = serverSocket.getLocalPort();
+        String uniqueServiceName = SERVICE_NAME + "-" + Build.MODEL.replace(" ", "_");
+
+        Log.i(TAG, "Refreshing NSD registration for service: " + uniqueServiceName + " on port " + port);
+
+        // Unregister first (if registered) - this happens synchronously for the API call
+        // but the mDNS propagation is async
+        if (nsdHelper.isServiceRegistered()) {
+            nsdHelper.unregisterService();
+            Log.d(TAG, "NSD service unregistered, waiting before re-registration...");
+        }
+
+        // Delay re-registration to allow:
+        // 1. The unregister callback to complete
+        // 2. mDNS to propagate the unregistration to clients
+        // 3. Clients to clear their cached service records
+        mainHandler.postDelayed(() -> {
+            // Re-register the service
+            if (isRunning.get() && serverSocket != null && !serverSocket.isClosed()) {
+                Log.i(TAG, "Re-registering NSD service...");
+                nsdHelper.registerService(uniqueServiceName, SERVICE_TYPE, port);
+            } else {
+                Log.w(TAG, "Server stopped, skipping NSD re-registration");
+            }
+        }, 1000); // Increased delay for better mDNS propagation
     }
 
     /**
@@ -365,6 +511,230 @@ public class TcpWearService extends Service {
                 Thread.currentThread().interrupt();
             }
         }
+
+        // Release power and Wi-Fi locks
+        releaseLocks();
+    }
+
+    // =========================================
+    // Power and Wi-Fi Management
+    // =========================================
+
+    /**
+     * Initialize power management components.
+     * Critical for Wear OS to prevent Wi-Fi from being disabled when screen is off.
+     */
+    private void initializePowerManagement() {
+        // Initialize WifiManager
+        wifiManager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        
+        // Initialize ConnectivityManager
+        connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+
+        // Create WifiLock to prevent Wi-Fi from being disabled
+        if (wifiManager != null) {
+            wifiLock = wifiManager.createWifiLock(
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                    TAG + ":WifiLock"
+            );
+            wifiLock.setReferenceCounted(false);
+            Log.d(TAG, "WifiLock created");
+        } else {
+            Log.w(TAG, "WifiManager not available");
+        }
+
+        // Create WakeLock to prevent CPU from sleeping
+        PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (powerManager != null) {
+            wakeLock = powerManager.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    TAG + ":WakeLock"
+            );
+            wakeLock.setReferenceCounted(false);
+            Log.d(TAG, "WakeLock created");
+        } else {
+            Log.w(TAG, "PowerManager not available");
+        }
+    }
+
+    /**
+     * Acquire Wi-Fi and Wake locks to ensure connectivity.
+     */
+    private void acquireLocks() {
+        if (wifiLock != null && !wifiLock.isHeld()) {
+            wifiLock.acquire();
+            Log.i(TAG, "WifiLock acquired - Wi-Fi will remain active");
+        }
+
+        if (wakeLock != null && !wakeLock.isHeld()) {
+            wakeLock.acquire();
+            Log.i(TAG, "WakeLock acquired - CPU will remain active");
+        }
+    }
+
+    /**
+     * Release Wi-Fi and Wake locks.
+     */
+    private void releaseLocks() {
+        if (wifiLock != null && wifiLock.isHeld()) {
+            try {
+                wifiLock.release();
+                Log.i(TAG, "WifiLock released");
+            } catch (Exception e) {
+                Log.w(TAG, "Error releasing WifiLock", e);
+            }
+        }
+
+        if (wakeLock != null && wakeLock.isHeld()) {
+            try {
+                wakeLock.release();
+                Log.i(TAG, "WakeLock released");
+            } catch (Exception e) {
+                Log.w(TAG, "Error releasing WakeLock", e);
+            }
+        }
+    }
+
+    /**
+     * Check if Wi-Fi is currently connected.
+     * @return true if Wi-Fi is connected and has internet capability
+     */
+    private boolean isWifiConnected() {
+        if (connectivityManager == null) {
+            return false;
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Network activeNetwork = connectivityManager.getActiveNetwork();
+            if (activeNetwork == null) {
+                Log.d(TAG, "No active network");
+                return false;
+            }
+
+            NetworkCapabilities capabilities = connectivityManager.getNetworkCapabilities(activeNetwork);
+            if (capabilities == null) {
+                Log.d(TAG, "No network capabilities");
+                return false;
+            }
+
+            boolean hasWifi = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI);
+            boolean hasInternet = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+            
+            Log.d(TAG, "Network check - Wi-Fi: " + hasWifi + ", Internet: " + hasInternet);
+            return hasWifi;
+        } else {
+            // Legacy API for older devices
+            @SuppressWarnings("deprecation")
+            NetworkInfo networkInfo = connectivityManager.getActiveNetworkInfo();
+            boolean connected = networkInfo != null && 
+                    networkInfo.isConnected() && 
+                    networkInfo.getType() == ConnectivityManager.TYPE_WIFI;
+            Log.d(TAG, "Network check (legacy) - Connected: " + connected);
+            return connected;
+        }
+    }
+
+    /**
+     * Get the local IP address of the device on the Wi-Fi network.
+     * @return IP address string or "Unknown" if not available
+     */
+    private String getLocalIpAddress() {
+        try {
+            // Try to get IP from WifiManager first (most reliable on Wear OS)
+            if (wifiManager != null) {
+                WifiInfo wifiInfo = wifiManager.getConnectionInfo();
+                if (wifiInfo != null) {
+                    int ipInt = wifiInfo.getIpAddress();
+                    if (ipInt != 0) {
+                        String ip = String.format("%d.%d.%d.%d",
+                                (ipInt & 0xff),
+                                (ipInt >> 8 & 0xff),
+                                (ipInt >> 16 & 0xff),
+                                (ipInt >> 24 & 0xff));
+                        Log.d(TAG, "Local IP (from WifiManager): " + ip);
+                        return ip;
+                    }
+                }
+            }
+
+            // Fallback: enumerate network interfaces
+            java.util.Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            while (interfaces != null && interfaces.hasMoreElements()) {
+                NetworkInterface networkInterface = interfaces.nextElement();
+                java.util.Enumeration<InetAddress> addresses = networkInterface.getInetAddresses();
+                while (addresses.hasMoreElements()) {
+                    InetAddress address = addresses.nextElement();
+                    if (!address.isLoopbackAddress() && address instanceof Inet4Address) {
+                        String ip = address.getHostAddress();
+                        Log.d(TAG, "Local IP (from NetworkInterface " + networkInterface.getName() + "): " + ip);
+                        return ip;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error getting local IP address", e);
+        }
+        return "Unknown";
+    }
+
+    /**
+     * Run a connectivity diagnostic and broadcast results.
+     * Call this method to debug NSD discovery issues.
+     */
+    public void runConnectivityDiagnostic() {
+        StringBuilder diagnostic = new StringBuilder();
+        diagnostic.append("=== Connectivity Diagnostic ===\n\n");
+
+        // Server status
+        diagnostic.append("SERVER STATUS:\n");
+        diagnostic.append("  Running: ").append(isRunning.get()).append("\n");
+        diagnostic.append("  Port: ").append(getServerPort()).append("\n");
+        diagnostic.append("  Clients: ").append(getConnectedClientCount()).append("\n\n");
+
+        // Wi-Fi status
+        diagnostic.append("WI-FI STATUS:\n");
+        diagnostic.append("  Connected: ").append(isWifiConnected()).append("\n");
+        diagnostic.append("  Local IP: ").append(getLocalIpAddress()).append("\n");
+        
+        if (wifiManager != null) {
+            WifiInfo wifiInfo = wifiManager.getConnectionInfo();
+            if (wifiInfo != null) {
+                diagnostic.append("  SSID: ").append(wifiInfo.getSSID()).append("\n");
+                diagnostic.append("  RSSI: ").append(wifiInfo.getRssi()).append(" dBm\n");
+                diagnostic.append("  Link Speed: ").append(wifiInfo.getLinkSpeed()).append(" Mbps\n");
+            }
+        }
+        diagnostic.append("\n");
+
+        // Lock status
+        diagnostic.append("POWER MANAGEMENT:\n");
+        diagnostic.append("  WifiLock held: ").append(wifiLock != null && wifiLock.isHeld()).append("\n");
+        diagnostic.append("  WakeLock held: ").append(wakeLock != null && wakeLock.isHeld()).append("\n\n");
+
+        // NSD status
+        diagnostic.append("NSD STATUS:\n");
+        if (nsdHelper != null) {
+            diagnostic.append("  Registered: ").append(nsdHelper.isServiceRegistered()).append("\n");
+            diagnostic.append("  Service Name: ").append(nsdHelper.getRegisteredServiceName()).append("\n");
+            diagnostic.append("  Service Type: ").append(SERVICE_TYPE).append("\n");
+        } else {
+            diagnostic.append("  NsdHelper not initialized\n");
+        }
+        diagnostic.append("\n");
+
+        // Authentication status
+        diagnostic.append("AUTHENTICATION:\n");
+        diagnostic.append("  Authenticated: ").append(sessionManager.isAuthenticated()).append("\n");
+        diagnostic.append("  Authorized Client: ").append(hasAuthorizedClient()).append("\n");
+
+        String diagnosticText = diagnostic.toString();
+        Log.i(TAG, diagnosticText);
+
+        // Broadcast to UI
+        Intent intent = new Intent(ACTION_CONNECTIVITY_DIAGNOSTIC);
+        intent.setPackage(getPackageName());
+        intent.putExtra(EXTRA_DIAGNOSTIC_INFO, diagnosticText);
+        sendBroadcast(intent);
     }
 
     // =========================================
@@ -585,6 +955,12 @@ public class TcpWearService extends Service {
                     handlePing(message);
                     break;
 
+                case CMD_REQUEST_LOGOUT:
+                    // Special handling for logout when already logged out
+                    Log.w(TAG, "Logout requested but device is not authenticated");
+                    sendError("NOT_AUTHENTICATED", "Device is not currently authenticated");
+                    break;
+
                 default:
                     Log.w(TAG, "Unauthorized command rejected: " + command);
                     sendUnauthorized("Device not paired. Use 'pair' command to initiate pairing.");
@@ -639,20 +1015,21 @@ public class TcpWearService extends Service {
 
             // Process authorized command
             switch (command) {
-                case CMD_SET_ALARM:
-                    handleSetAlarm(message);
+                // New Event Commands (v2.0)
+                case CMD_SYNC_EVENTS:
+                    handleSyncEvents(message);
                     break;
 
-                case CMD_DELETE_ALARM:
-                    handleDeleteAlarm(message);
+                case CMD_UPDATE_EVENT:
+                    handleUpdateEvent(message);
                     break;
 
-                case CMD_GET_ALARMS:
-                    handleGetAlarms();
+                case CMD_GET_EVENTS:
+                    handleGetEvents(message);
                     break;
 
-                case CMD_SET_ALARM_STATUS:
-                    handleSetAlarmStatus(message);
+                case CMD_DELETE_EVENT:
+                    handleDeleteEvent(message);
                     break;
 
                 case CMD_SET_ANIMATION_STATE:
@@ -833,173 +1210,204 @@ public class TcpWearService extends Service {
         // Authorized Command Handlers
         // =========================================
 
-        /**
-         * Handle set_alarm command - creates a new alarm.
-         * 
-         * Request: {"command": "set_alarm", "token": "...", "time_millis": 1712345678000, 
-         *           "label": "Morning Wakeup", "stop_signal": "SIGNAL_SHAKE"}
-         * Response: {"type": "alarm_created", "alarm": {...}, "timestamp": ...}
-         */
-        private void handleSetAlarm(JSONObject message) {
-            long timeMillis = message.optLong("time_millis", 0);
-            String label = message.optString("label", "");
-            String stopSignal = message.optString("stop_signal", SignalRegistry.SIGNAL_SHAKE);
-
-            Log.d(TAG, "Set alarm: time=" + timeMillis + ", label=" + label + ", signal=" + stopSignal);
-
-            // Validate time
-            if (timeMillis <= 0) {
-                sendError("INVALID_TIME", "time_millis is required and must be positive");
-                return;
-            }
-
-            if (timeMillis <= System.currentTimeMillis()) {
-                sendError("INVALID_TIME", "Alarm time must be in the future");
-                return;
-            }
-
-            // Validate stop signal
-            SignalRegistry.ValidationResult validation = signalRegistry.validateSignal(stopSignal);
-            if (!validation.isValid()) {
-                Log.w(TAG, "Signal validation failed: " + validation.getErrorCode());
-                sendValidationError(stopSignal, validation);
-                return;
-            }
-
-            // Schedule the alarm
-            Alarm alarm = alarmScheduler.scheduleAlarm(timeMillis, label, stopSignal);
-            if (alarm == null) {
-                sendError("ALARM_SCHEDULE_FAILED", "Failed to schedule alarm");
-                return;
-            }
-
-            // Send success response with alarm details
-            try {
-                JSONObject response = new JSONObject();
-                response.put("type", RESP_ALARM_CREATED);
-                response.put("message", "Alarm scheduled successfully");
-                response.put("alarm", alarm.toJson());
-                response.put("timestamp", System.currentTimeMillis());
-                sendJson(response);
-            } catch (JSONException e) {
-                Log.e(TAG, "Error creating alarm created response", e);
-            }
-        }
+        // =========================================
+        // New Event Handlers (v2.0)
+        // =========================================
 
         /**
-         * Handle delete_alarm command - removes an alarm.
+         * Handle sync_events command - full synchronization of events from client.
+         * Replaces all existing events with the provided list.
          * 
-         * Request: {"command": "delete_alarm", "token": "...", "alarm_id": "uuid"}
-         * Response: {"type": "alarm_deleted", "alarm_id": "uuid", "timestamp": ...}
+         * Request: {"command": "sync_events", "token": "...", "events": [...]}
+         * Response: {"type": "events_synced", "event_count": 5, "sync_timestamp": ..., "timestamp": ...}
          */
-        private void handleDeleteAlarm(JSONObject message) {
-            String alarmId = message.optString("alarm_id", "");
+        private void handleSyncEvents(JSONObject message) {
+            JSONArray eventsArray = message.optJSONArray("events");
+            
+            Log.d(TAG, "Sync events: " + (eventsArray != null ? eventsArray.length() : 0) + " events");
 
-            Log.d(TAG, "Delete alarm: " + alarmId);
-
-            if (alarmId.isEmpty()) {
-                sendError("MISSING_ALARM_ID", "alarm_id is required");
-                return;
-            }
-
-            boolean deleted = alarmScheduler.cancelAlarm(alarmId, true);
-            if (!deleted) {
-                sendError("ALARM_NOT_FOUND", "Alarm with ID " + alarmId + " not found");
+            if (eventsArray == null) {
+                sendError("MISSING_EVENTS", "events array is required");
                 return;
             }
 
             try {
-                JSONObject response = new JSONObject();
-                response.put("type", RESP_ALARM_DELETED);
-                response.put("message", "Alarm deleted successfully");
-                response.put("alarm_id", alarmId);
-                response.put("timestamp", System.currentTimeMillis());
-                sendJson(response);
-            } catch (JSONException e) {
-                Log.e(TAG, "Error creating alarm deleted response", e);
-            }
-        }
-
-        /**
-         * Handle get_alarms command - returns all alarms.
-         * 
-         * Request: {"command": "get_alarms", "token": "..."}
-         * Response: {"type": "alarms_list", "alarms": [...], "count": 5, "timestamp": ...}
-         */
-        private void handleGetAlarms() {
-            Log.d(TAG, "Get alarms requested");
-
-            try {
-                java.util.List<Alarm> alarms = alarmScheduler.getAllAlarms();
-                JSONArray alarmsArray = new JSONArray();
-                
-                for (Alarm alarm : alarms) {
-                    alarmsArray.put(alarm.toJson());
+                // Parse and validate all events
+                java.util.List<ScheduledEvent> events = new java.util.ArrayList<>();
+                for (int i = 0; i < eventsArray.length(); i++) {
+                    JSONObject eventJson = eventsArray.getJSONObject(i);
+                    ScheduledEvent event = ScheduledEvent.fromJson(eventJson);
+                    
+                    // Validate termination signal
+                    SignalRegistry.ValidationResult validation = signalRegistry.validateSignal(event.getTerminationSignal());
+                    if (!validation.isValid()) {
+                        Log.w(TAG, "Event " + event.getId() + " has invalid signal: " + validation.getErrorCode());
+                        // Use default signal instead of failing
+                        event = event.withTerminationSignal(SignalRegistry.SIGNAL_SHAKE);
+                    }
+                    
+                    events.add(event);
                 }
 
+                // Sync events to repository (this triggers rescheduling)
+                int count = eventRepository.syncEvents(events);
+
+                // Send success response
                 JSONObject response = new JSONObject();
-                response.put("type", RESP_ALARMS_LIST);
-                response.put("alarms", alarmsArray);
-                response.put("count", alarms.size());
+                response.put("type", RESP_EVENTS_SYNCED);
+                response.put("message", "Synchronized " + count + " events");
+                response.put("event_count", count);
+                response.put("sync_timestamp", eventRepository.getLastSyncTimestamp());
                 response.put("timestamp", System.currentTimeMillis());
                 sendJson(response);
+
             } catch (JSONException e) {
-                Log.e(TAG, "Error creating alarms list response", e);
-                sendError("ALARMS_ERROR", "Failed to get alarms: " + e.getMessage());
+                Log.e(TAG, "Error parsing events for sync", e);
+                sendError("INVALID_EVENT_DATA", "Failed to parse events: " + e.getMessage());
             }
         }
 
         /**
-         * Handle set_alarm_status command - enables/disables an alarm.
+         * Handle update_event command - update a specific event or toggle its state.
          * 
-         * Legacy behavior (no alarm_id): Sets the global alarm ON/OFF state
-         * New behavior (with alarm_id): Enables/disables specific alarm
-         * 
-         * Request: {"command": "set_alarm_status", "token": "...", "status": "ON/OFF"}
-         * Request: {"command": "set_alarm_status", "token": "...", "alarm_id": "uuid", "status": "ON/OFF"}
+         * Full update: {"command": "update_event", "token": "...", "event": {...}}
+         * Toggle only: {"command": "update_event", "token": "...", "event_id": "uuid", "enabled": false}
          */
-        private void handleSetAlarmStatus(JSONObject message) {
-            String status = message.optString("status", "");
-            String alarmId = message.optString("alarm_id", null);
+        private void handleUpdateEvent(JSONObject message) {
+            JSONObject eventJson = message.optJSONObject("event");
+            String eventId = message.optString("event_id", null);
             
-            Log.d(TAG, "Set alarm status: " + status + ", alarmId=" + alarmId);
+            Log.d(TAG, "Update event: eventId=" + eventId + ", hasFullEvent=" + (eventJson != null));
 
-            if (status.isEmpty()) {
-                sendError("MISSING_STATUS", "Alarm status is required");
-                return;
-            }
+            try {
+                ScheduledEvent updatedEvent;
 
-            boolean enabled = "ON".equalsIgnoreCase(status);
-
-            // Check if this is for a specific alarm or global status
-            if (alarmId != null && !alarmId.isEmpty()) {
-                // Toggle specific alarm
-                Alarm alarm = alarmScheduler.setAlarmEnabled(alarmId, enabled);
-                if (alarm == null) {
-                    sendError("ALARM_NOT_FOUND", "Alarm with ID " + alarmId + " not found");
+                if (eventJson != null) {
+                    // Full event update
+                    updatedEvent = ScheduledEvent.fromJson(eventJson);
+                    
+                    // Validate termination signal
+                    SignalRegistry.ValidationResult validation = signalRegistry.validateSignal(updatedEvent.getTerminationSignal());
+                    if (!validation.isValid()) {
+                        sendValidationError(updatedEvent.getTerminationSignal(), validation);
+                        return;
+                    }
+                    
+                    // Update in repository
+                    eventRepository.updateEvent(updatedEvent);
+                    
+                } else if (eventId != null && !eventId.isEmpty()) {
+                    // Toggle enabled state only
+                    boolean enabled = message.optBoolean("enabled", true);
+                    updatedEvent = eventScheduler.setEventEnabled(eventId, enabled);
+                    
+                    if (updatedEvent == null) {
+                        sendError("EVENT_NOT_FOUND", "Event with ID " + eventId + " not found");
+                        return;
+                    }
+                } else {
+                    sendError("MISSING_EVENT_DATA", "Either 'event' object or 'event_id' is required");
                     return;
                 }
 
-                try {
-                    JSONObject response = new JSONObject();
-                    response.put("type", RESP_ALARM_UPDATED);
-                    response.put("message", "Alarm " + (enabled ? "enabled" : "disabled"));
-                    response.put("alarm", alarm.toJson());
-                    response.put("timestamp", System.currentTimeMillis());
-                    sendJson(response);
-                } catch (JSONException e) {
-                    Log.e(TAG, "Error creating alarm updated response", e);
+                // Send success response
+                JSONObject response = new JSONObject();
+                response.put("type", RESP_EVENT_UPDATED);
+                response.put("message", "Event " + (updatedEvent.isEnabled() ? "enabled" : "disabled"));
+                response.put("event", updatedEvent.toJson());
+                response.put("timestamp", System.currentTimeMillis());
+                sendJson(response);
+
+            } catch (JSONException e) {
+                Log.e(TAG, "Error updating event", e);
+                sendError("INVALID_EVENT_DATA", "Failed to parse event: " + e.getMessage());
+            }
+        }
+
+        /**
+         * Handle get_events command - returns all events, optionally filtered by type.
+         * 
+         * Request: {"command": "get_events", "token": "..."}
+         * Request: {"command": "get_events", "token": "...", "event_type": "ALARM"}
+         */
+        private void handleGetEvents(JSONObject message) {
+            String eventTypeFilter = message.optString("event_type", null);
+            
+            Log.d(TAG, "Get events requested, filter=" + eventTypeFilter);
+
+            try {
+                java.util.List<ScheduledEvent> events;
+                
+                if (eventTypeFilter != null && !eventTypeFilter.isEmpty()) {
+                    try {
+                        ScheduledEvent.EventType type = ScheduledEvent.EventType.valueOf(eventTypeFilter.toUpperCase());
+                        events = eventRepository.getEventsByType(type);
+                    } catch (IllegalArgumentException e) {
+                        sendError("INVALID_EVENT_TYPE", "Unknown event type: " + eventTypeFilter);
+                        return;
+                    }
+                } else {
+                    events = eventRepository.getAllEvents();
                 }
-            } else {
-                // Legacy: Set global alarm state
-                AlarmStatusRepository.getInstance().setAlarmStatus(enabled);
-                sendSuccess("Alarm status set to: " + status);
+
+                JSONArray eventsArray = new JSONArray();
+                for (ScheduledEvent event : events) {
+                    eventsArray.put(event.toJson());
+                }
+
+                JSONObject response = new JSONObject();
+                response.put("type", RESP_EVENTS_LIST);
+                response.put("events", eventsArray);
+                response.put("count", events.size());
+                response.put("last_sync_timestamp", eventRepository.getLastSyncTimestamp());
+                response.put("timestamp", System.currentTimeMillis());
+                sendJson(response);
+
+            } catch (JSONException e) {
+                Log.e(TAG, "Error creating events list response", e);
+                sendError("EVENTS_ERROR", "Failed to get events: " + e.getMessage());
+            }
+        }
+
+        /**
+         * Handle delete_event command - removes an event by ID.
+         * 
+         * Request: {"command": "delete_event", "token": "...", "event_id": "uuid"}
+         */
+        private void handleDeleteEvent(JSONObject message) {
+            String eventId = message.optString("event_id", "");
+
+            Log.d(TAG, "Delete event: " + eventId);
+
+            if (eventId.isEmpty()) {
+                sendError("MISSING_EVENT_ID", "event_id is required");
+                return;
+            }
+
+            boolean deleted = eventScheduler.cancelEvent(eventId, true);
+            if (!deleted) {
+                sendError("EVENT_NOT_FOUND", "Event with ID " + eventId + " not found");
+                return;
+            }
+
+            try {
+                JSONObject response = new JSONObject();
+                response.put("type", RESP_EVENT_DELETED);
+                response.put("message", "Event deleted successfully");
+                response.put("event_id", eventId);
+                response.put("timestamp", System.currentTimeMillis());
+                sendJson(response);
+            } catch (JSONException e) {
+                Log.e(TAG, "Error creating event deleted response", e);
             }
         }
 
         private void handleSetAnimationState(JSONObject message) {
             String anim = message.optString("state", "");
-            Log.d(TAG, "Set animation state: " + anim);
+            // Duration: -1 or 0 = auto-calculate from animation length, >0 = explicit duration
+            // Default to 0 (auto) if not specified
+            long duration = message.optLong("duration", 0);
+            Log.d(TAG, "Set animation state: " + anim + ", duration: " + (duration <= 0 ? "auto" : duration + "ms"));
 
             if (anim.isEmpty()) {
                 sendError("MISSING_STATE", "Animation state is required");
@@ -1008,8 +1416,25 @@ public class TcpWearService extends Service {
 
             try {
                 AnimationRenderer.AnimState state = AnimationRenderer.AnimState.valueOf(anim.toUpperCase());
-                AnimationStateRepository.getInstance().setState(state);
-                sendSuccess("Animation state set to: " + anim);
+                
+                // Use setExternalState to properly handle TCP-triggered animations
+                // This will:
+                // 1. Block sensor-based state changes during the animation
+                // 2. Auto-return to IDLE after the animation completes (or specified duration)
+                // 3. Allow subsequent TCP commands to override the current animation
+                if (state == AnimationRenderer.AnimState.IDLE) {
+                    // If explicitly setting to IDLE, end any external animation and reset
+                    AnimationStateRepository.getInstance().forceResetToIdle();
+                    sendSuccess("Animation state set to: IDLE (immediate)");
+                } else if (duration <= 0) {
+                    // Auto-calculate duration from animation frame count
+                    AnimationStateRepository.getInstance().setExternalState(state);
+                    sendSuccess("Animation state set to: " + anim + " (duration: auto-calculated)");
+                } else {
+                    // Explicit duration specified
+                    AnimationStateRepository.getInstance().setExternalState(state, duration);
+                    sendSuccess("Animation state set to: " + anim + " (duration: " + duration + "ms)");
+                }
             } catch (IllegalArgumentException e) {
                 sendError("INVALID_STATE", "Unknown animation state: " + anim);
             }
@@ -1090,6 +1515,19 @@ public class TcpWearService extends Service {
                 response.put("server_name", SERVICE_NAME);
                 response.put("authenticated", sessionManager.isAuthenticated());
                 response.put("timestamp", System.currentTimeMillis());
+                
+                // Add event system information
+                if (eventRepository != null) {
+                    response.put("event_count", eventRepository.getEventCount());
+                    response.put("enabled_event_count", eventRepository.getEnabledEventCount());
+                    
+                    // Include next scheduled event if any
+                    ScheduledEvent nextEvent = eventRepository.getNextScheduledEvent();
+                    if (nextEvent != null) {
+                        response.put("next_event", nextEvent.toJson());
+                    }
+                }
+                
                 sendJson(response);
             } catch (JSONException e) {
                 Log.e(TAG, "Error creating status response", e);
@@ -1115,6 +1553,10 @@ public class TcpWearService extends Service {
 
             // Broadcast logout to MainActivity
             broadcastToMainActivity(ACTION_REMOTE_LOGOUT);
+
+            // Re-register NSD service to ensure discoverability after logout
+            // This forces a fresh mDNS announcement for new pairing attempts
+            refreshNsdRegistration();
 
             // Send success response
             try {
@@ -1351,6 +1793,46 @@ public class TcpWearService extends Service {
     public void broadcastToClients(JSONObject message) {
         for (ClientConnection client : connectedClients) {
             client.sendJson(message);
+        }
+    }
+
+    /**
+     * Broadcast event_triggered notification to all connected clients.
+     * Called when a scheduled event (alarm/reminder) fires.
+     *
+     * @param event The triggered event
+     */
+    public void broadcastEventTriggered(@NonNull ScheduledEvent event) {
+        try {
+            JSONObject message = new JSONObject();
+            message.put("type", RESP_EVENT_TRIGGERED);
+            message.put("event", event.toJson());
+            message.put("trigger_timestamp", System.currentTimeMillis());
+            broadcastToClients(message);
+            Log.d(TAG, "Broadcasted event_triggered for: " + event.getId());
+        } catch (JSONException e) {
+            Log.e(TAG, "Error creating event_triggered broadcast", e);
+        }
+    }
+
+    /**
+     * Broadcast event_dismissed notification to all connected clients.
+     * Called when a scheduled event is dismissed (user performed termination signal).
+     *
+     * @param event The dismissed event
+     * @param dismissedBy How the event was dismissed (e.g., "gesture", "timeout", "manual")
+     */
+    public void broadcastEventDismissed(@NonNull ScheduledEvent event, @NonNull String dismissedBy) {
+        try {
+            JSONObject message = new JSONObject();
+            message.put("type", RESP_EVENT_DISMISSED);
+            message.put("event_id", event.getId());
+            message.put("dismissed_by", dismissedBy);
+            message.put("timestamp", System.currentTimeMillis());
+            broadcastToClients(message);
+            Log.d(TAG, "Broadcasted event_dismissed for: " + event.getId() + " by: " + dismissedBy);
+        } catch (JSONException e) {
+            Log.e(TAG, "Error creating event_dismissed broadcast", e);
         }
     }
 
