@@ -295,18 +295,29 @@ public class AnimationRenderer {
         
         // If not cached or cache miss, load on-demand (but this should be rare with async preload)
         if (frame == null || frame.isRecycled()) {
-            // Recycle previous non-cached frame to prevent memory leak
-            if (previousNonCachedFrame != null && !previousNonCachedFrame.isRecycled()) {
-                previousNonCachedFrame.recycle();
-            }
             String framePath = currentFolderPath + "/" + frameFiles.get(currentFrameIndex);
             frame = loadFrameFromAssets(framePath);
+            
+            // Store old frame reference before updating
+            Bitmap oldFrame = previousNonCachedFrame;
             previousNonCachedFrame = frame;
+            
+            if (frame != null && !frame.isRecycled()) {
+                targetView.setImageBitmap(frame);
+            }
+            
+            // Only recycle the old frame AFTER setting new bitmap to ImageView
+            // This prevents "Canvas: trying to use a recycled bitmap" crash
+            if (oldFrame != null && !oldFrame.isRecycled() && oldFrame != frame) {
+                oldFrame.recycle();
+            }
+            
+            currentFrameIndex++;
+            return;
         }
 
         if (frame != null && !frame.isRecycled()) {
             targetView.setImageBitmap(frame);
-            // Removed explicit invalidate() - setImageBitmap handles this
         }
 
         currentFrameIndex++;

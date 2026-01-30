@@ -460,6 +460,7 @@ public class MainActivity extends Activity implements
         gestureRecordingController.release();
         gestureMatcher.release();
         alarmManagerUtils.release();
+        animationRenderer.release();
     }
 
     // --- Touch Handling ---
