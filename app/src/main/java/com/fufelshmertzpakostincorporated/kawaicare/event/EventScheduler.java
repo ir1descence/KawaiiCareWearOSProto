@@ -143,44 +143,47 @@ public class EventScheduler implements EventRepository.EventChangeListener {
         PendingIntent pendingIntent = createEventPendingIntent(event);
 
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                // Android 12+: Check for exact alarm permission
-                if (alarmManager.canScheduleExactAlarms()) {
-                    alarmManager.setExactAndAllowWhileIdle(
-                            AlarmManager.RTC_WAKEUP,
-                            triggerTime,
-                            pendingIntent
-                    );
-                } else {
-                    Log.w(TAG, "Exact alarm permission not granted, using inexact");
-                    alarmManager.setAndAllowWhileIdle(
-                            AlarmManager.RTC_WAKEUP,
-                            triggerTime,
-                            pendingIntent
-                    );
-                }
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                // Android 6.0+: Use setExactAndAllowWhileIdle for Doze
-                alarmManager.setExactAndAllowWhileIdle(
-                        AlarmManager.RTC_WAKEUP,
-                        triggerTime,
-                        pendingIntent
-                );
-            } else {
-                // Older Android versions
-                alarmManager.setExact(
-                        AlarmManager.RTC_WAKEUP,
-                        triggerTime,
-                        pendingIntent
-                );
-            }
-
+            scheduleExactAlarm(triggerTime, pendingIntent);
             Log.d(TAG, "Event scheduled with AlarmManager: " + event.getId() + 
                     " at " + triggerTime + " (in " + (triggerTime - System.currentTimeMillis()) + "ms)");
-
         } catch (SecurityException e) {
-            Log.e(TAG, "SecurityException scheduling event", e);
+            Log.e(TAG, "SecurityException scheduling event: " + event.getId(), e);
+            // Fallback to inexact alarm
+            try {
+                alarmManager.set(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent);
+                Log.w(TAG, "Scheduled inexact alarm as fallback for event: " + event.getId());
+            } catch (Exception fallbackException) {
+                Log.e(TAG, "Failed to schedule even inexact alarm: " + event.getId(), fallbackException);
+            }
+        } catch (IllegalStateException e) {
+            Log.e(TAG, "IllegalStateException scheduling event: " + event.getId(), e);
         }
+    }
+
+    /**
+     * Schedule an alarm using the best available method for the current API level.
+     */
+    private void scheduleExactAlarm(long triggerTime, PendingIntent pendingIntent) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) {
+            Log.w(TAG, "Exact alarm permission not granted, using inexact");
+            alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent);
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent);
+        } else {
+            alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerTime, pendingIntent);
+        }
+    }
+
+    /**
+     * Get appropriate PendingIntent flags for the current API level.
+     * @param allowCreate If true, uses FLAG_UPDATE_CURRENT; otherwise FLAG_NO_CREATE
+     */
+    private static int getPendingIntentFlags(boolean allowCreate) {
+        int flags = allowCreate ? PendingIntent.FLAG_UPDATE_CURRENT : PendingIntent.FLAG_NO_CREATE;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            flags |= PendingIntent.FLAG_IMMUTABLE;
+        }
+        return flags;
     }
 
     /**
@@ -370,16 +373,11 @@ public class EventScheduler implements EventRepository.EventChangeListener {
         intent.putExtra(EXTRA_ANIMATION, event.getPayload().getAnimation());
         intent.putExtra(EXTRA_VIBRATE, event.getPayload().shouldVibrate());
 
-        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            flags |= PendingIntent.FLAG_IMMUTABLE;
-        }
-
         return PendingIntent.getBroadcast(
                 context,
                 event.getRequestCode(),
                 intent,
-                flags
+                getPendingIntentFlags(true)
         );
     }
 
@@ -410,16 +408,11 @@ public class EventScheduler implements EventRepository.EventChangeListener {
         Intent intent = new Intent(context, AlarmTriggerReceiver.class);
         intent.setAction(ACTION_EVENT_TRIGGER);
 
-        int flags = PendingIntent.FLAG_NO_CREATE;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            flags |= PendingIntent.FLAG_IMMUTABLE;
-        }
-
         PendingIntent pendingIntent = PendingIntent.getBroadcast(
                 context,
                 Math.abs(eventId.hashCode()),
                 intent,
-                flags
+                getPendingIntentFlags(false)
         );
 
         if (pendingIntent != null) {

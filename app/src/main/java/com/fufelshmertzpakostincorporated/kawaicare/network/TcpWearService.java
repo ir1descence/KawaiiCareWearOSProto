@@ -1530,6 +1530,47 @@ public class TcpWearService extends Service {
             }
         }
 
+        private AnimationRenderer.AnimState resolveAnimationState(String anim) {
+            if (anim == null) return null;
+            String trimmed = anim.trim();
+            if (trimmed.isEmpty()) return null;
+
+            try {
+                return AnimationRenderer.AnimState.valueOf(trimmed.toUpperCase());
+            } catch (IllegalArgumentException ignored) {
+                // Fall through to alias mapping
+            }
+
+            String key = trimmed.toLowerCase();
+            switch (key) {
+                case "blinks":
+                case "wink_1":
+                case "wink_2":
+                    return AnimationRenderer.AnimState.IDLE;
+                case "looks_to_the_left":
+                case "turn_left":
+                    return AnimationRenderer.AnimState.LOOK_LEFT;
+                case "looks_to_the_right":
+                case "turn_right":
+                    return AnimationRenderer.AnimState.LOOK_RIGHT;
+                case "nod":
+                case "nods":
+                    return AnimationRenderer.AnimState.GESTURE_ACTION;
+                case "shake_smile":
+                case "shake":
+                    return AnimationRenderer.AnimState.SHAKE;
+                case "notification":
+                case "notice":
+                    return AnimationRenderer.AnimState.ALARM;
+                case "notification_postpone":
+                    return AnimationRenderer.AnimState.NOTIFICATION_POSTPONE;
+                case "fright":
+                    return AnimationRenderer.AnimState.FRIGHT;
+                default:
+                    return null;
+            }
+        }
+
         private void handleSetAnimationState(JSONObject message) {
             String anim = message.optString("state", "");
             // Duration: -1 or 0 = auto-calculate from animation length, >0 = explicit duration
@@ -1542,8 +1583,11 @@ public class TcpWearService extends Service {
                 return;
             }
 
-            try {
-                AnimationRenderer.AnimState state = AnimationRenderer.AnimState.valueOf(anim.toUpperCase());
+            AnimationRenderer.AnimState state = resolveAnimationState(anim);
+            if (state == null) {
+                sendError("INVALID_STATE", "Unknown animation state: " + anim);
+                return;
+            }
                 
                 // Use setExternalState to properly handle TCP-triggered animations
                 // This will:
@@ -1563,9 +1607,6 @@ public class TcpWearService extends Service {
                     AnimationStateRepository.getInstance().setExternalState(state, duration);
                     sendSuccess("Animation state set to: " + anim + " (duration: " + duration + "ms)");
                 }
-            } catch (IllegalArgumentException e) {
-                sendError("INVALID_STATE", "Unknown animation state: " + anim);
-            }
         }
 
         private void handleSetActiveGesture(JSONObject message) {

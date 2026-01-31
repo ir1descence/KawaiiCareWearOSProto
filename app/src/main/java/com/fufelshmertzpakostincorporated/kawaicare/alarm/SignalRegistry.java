@@ -5,11 +5,15 @@ import android.hardware.Sensor;
 import android.hardware.SensorManager;
 import android.util.Log;
 
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
+import com.fufelshmertzpakostincorporated.kawaicare.util.GestureFileUtils;
+
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -38,10 +42,6 @@ public class SignalRegistry {
             SIGNAL_LONG_TOUCH,
             SIGNAL_CUSTOM
     };
-
-    // Gestures directory for custom gesture files
-    private static final String GESTURES_DIR = "gestures";
-    private static final String GESTURE_FILE_EXTENSION = ".gesture";
 
     // Error codes for validation
     public static final String ERROR_NO_ACCELEROMETER = "ERROR_NO_ACCELEROMETER";
@@ -127,10 +127,17 @@ public class SignalRegistry {
      * @param signal The signal constant to validate
      * @return ValidationResult containing validity status and any error
      */
-    public ValidationResult validateSignal(String signal) {
-        if (signal == null || signal.isEmpty()) {
+    @NonNull
+    public ValidationResult validateSignal(@Nullable String signal) {
+        // Null check to prevent NPE
+        if (signal == null) {
             return new ValidationResult(false, ERROR_HARDWARE_NOT_SUPPORTED, 
-                    "Invalid signal: null or empty");
+                    "Signal cannot be null");
+        }
+        
+        if (signal.isEmpty()) {
+            return new ValidationResult(false, ERROR_HARDWARE_NOT_SUPPORTED, 
+                    "Invalid signal: empty string");
         }
 
         switch (signal) {
@@ -190,7 +197,8 @@ public class SignalRegistry {
      * @param signal The signal to validate
      * @return null if valid, error JSON string if invalid
      */
-    public String validateSignalRequest(String signal) {
+    @Nullable
+    public String validateSignalRequest(@Nullable String signal) {
         ValidationResult result = validateSignal(signal);
         if (result.isValid()) {
             return null;
@@ -201,16 +209,24 @@ public class SignalRegistry {
     // --- Hardware Detection Methods ---
 
     /**
+     * Check if a sensor is available, generic helper method.
+     * 
+     * @param sensorType The sensor type constant from Sensor class
+     * @return true if the sensor is available
+     */
+    private boolean checkSensorAvailability(int sensorType) {
+        if (sensorManager == null) {
+            return false;
+        }
+        return sensorManager.getDefaultSensor(sensorType) != null;
+    }
+
+    /**
      * Check if the device has an accelerometer sensor.
      */
     public boolean hasAccelerometer() {
         if (hasAccelerometer == null) {
-            if (sensorManager != null) {
-                Sensor accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
-                hasAccelerometer = (accelerometer != null);
-            } else {
-                hasAccelerometer = false;
-            }
+            hasAccelerometer = checkSensorAvailability(Sensor.TYPE_ACCELEROMETER);
             Log.d(TAG, "Accelerometer available: " + hasAccelerometer);
         }
         return hasAccelerometer;
@@ -221,12 +237,7 @@ public class SignalRegistry {
      */
     public boolean hasGyroscope() {
         if (hasGyroscope == null) {
-            if (sensorManager != null) {
-                Sensor gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
-                hasGyroscope = (gyroscope != null);
-            } else {
-                hasGyroscope = false;
-            }
+            hasGyroscope = checkSensorAvailability(Sensor.TYPE_GYROSCOPE);
             Log.d(TAG, "Gyroscope available: " + hasGyroscope);
         }
         return hasGyroscope;
@@ -238,15 +249,7 @@ public class SignalRegistry {
      * Check if a custom gesture file has been recorded and saved.
      */
     public boolean hasCustomGestureFile() {
-        File gesturesDir = new File(context.getFilesDir(), GESTURES_DIR);
-        if (!gesturesDir.exists()) {
-            return false;
-        }
-
-        File[] files = gesturesDir.listFiles((dir, name) -> 
-                name.endsWith(GESTURE_FILE_EXTENSION));
-        
-        return files != null && files.length > 0;
+        return GestureFileUtils.hasCustomGestureFile(context);
     }
 
     /**
@@ -254,29 +257,13 @@ public class SignalRegistry {
      * 
      * @return File path string, or null if no gesture file exists
      */
+    @Nullable
     public String getCustomGestureFilePath() {
-        File gesturesDir = new File(context.getFilesDir(), GESTURES_DIR);
-        if (!gesturesDir.exists()) {
-            return null;
+        String path = GestureFileUtils.getNewestGestureFilePath(context);
+        if (path != null) {
+            Log.d(TAG, "Custom gesture file: " + path);
         }
-
-        File[] files = gesturesDir.listFiles((dir, name) -> 
-                name.endsWith(GESTURE_FILE_EXTENSION));
-        
-        if (files == null || files.length == 0) {
-            return null;
-        }
-
-        // Find the most recent gesture file
-        File newestFile = files[0];
-        for (File file : files) {
-            if (file.lastModified() > newestFile.lastModified()) {
-                newestFile = file;
-            }
-        }
-
-        Log.d(TAG, "Custom gesture file: " + newestFile.getAbsolutePath());
-        return newestFile.getAbsolutePath();
+        return path;
     }
 
     /**
@@ -286,7 +273,8 @@ public class SignalRegistry {
      * @param signal The signal constant
      * @return Resource mapping info, or null if not applicable
      */
-    public SignalResourceMapping getSignalResourceMapping(String signal) {
+    @NonNull
+    public SignalResourceMapping getSignalResourceMapping(@Nullable String signal) {
         if (!SIGNAL_CUSTOM.equals(signal)) {
             // Non-custom signals don't have external resource mappings
             return new SignalResourceMapping(signal, null, null);

@@ -7,6 +7,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.ActivityInfo;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.os.Build;
@@ -159,6 +160,9 @@ public class MainActivity extends Activity implements
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // Lock screen orientation to prevent rotation issues on Wear OS
+        lockScreenOrientation();
 
         // 0. Initialize Session Manager and check auth state
         sessionManager = SessionManager.getInstance(this);
@@ -402,8 +406,8 @@ public class MainActivity extends Activity implements
     }
 
     private void loadAssets() {
-        // Initialize with default animation
-        animationRenderer.setFolderAnimation("wink_1", true);
+        // Initialize with default animation using the new blinks folder
+        animationRenderer.setFolderAnimation("blinks", true);
         animationRenderer.setState(AnimationRenderer.AnimState.IDLE);
     }
 
@@ -468,6 +472,9 @@ public class MainActivity extends Activity implements
         super.onConfigurationChanged(newConfig);
         Log.i(TAG, "Configuration changed: orientation=" + newConfig.orientation + " uiMode=" + newConfig.uiMode);
 
+        // Re-lock orientation in case system tried to change it
+        lockScreenOrientation();
+
         // Update layout-dependent controllers with latest view measurements
         if (imageView != null) {
             imageView.post(() -> {
@@ -479,6 +486,34 @@ public class MainActivity extends Activity implements
                 // Force animation engine to refresh frames for new size without restarting the Activity
                 animationRenderer.setState(animationRenderer.getCurrentState());
             });
+        }
+    }
+
+    /**
+     * Lock screen orientation to prevent rotation issues on Wear OS.
+     * Uses multiple strategies for maximum compatibility:
+     * 1. SCREEN_ORIENTATION_LOCKED - Locks to current orientation
+     * 2. NOSENSOR fallback - Ignores sensor-based rotation
+     * 3. Window flag to prevent layout changes from rotation
+     */
+    private void lockScreenOrientation() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                // SCREEN_ORIENTATION_LOCKED locks to the current orientation
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LOCKED);
+            } else {
+                // Fallback for older devices - ignore sensors
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_NOSENSOR);
+            }
+            Log.d(TAG, "Screen orientation locked");
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to lock screen orientation: " + e.getMessage());
+            // Fallback: try NOSENSOR which is more widely supported
+            try {
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_NOSENSOR);
+            } catch (Exception e2) {
+                Log.e(TAG, "All orientation lock attempts failed", e2);
+            }
         }
     }
 
@@ -707,19 +742,27 @@ public class MainActivity extends Activity implements
     private String getFolderPathForState(AnimationRenderer.AnimState state) {
         switch (state) {
             case IDLE:
-                return "wink_2";
+                return "blinks";
             case TILTED:
-                return "turn_left";
+                return "looks_to_the_left";
             case GESTURE_ACTION:
-                return "nods";
+                return "nod";
             case SHAKE:
-                return "shake";
+                return "shake_smile";
             case ALARM:
-                return "notice";
+                return "notification";
             case LEARNING:
-                return "turn_right";
+                return "looks_to_the_right";
+            case FRIGHT:
+                return "fright";
+            case LOOK_LEFT:
+                return "looks_to_the_left";
+            case LOOK_RIGHT:
+                return "looks_to_the_right";
+            case NOTIFICATION_POSTPONE:
+                return "notification_postpone";
             default:
-                return "wink_1";
+                return "blinks";
         }
     }
 

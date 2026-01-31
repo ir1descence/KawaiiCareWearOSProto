@@ -8,7 +8,11 @@ import android.hardware.SensorManager;
 import android.util.Log;
 import android.view.MotionEvent;
 
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
 import com.fufelshmertzpakostincorporated.kawaicare.model.GestureSession;
+import com.fufelshmertzpakostincorporated.kawaicare.util.GestureFileUtils;
 import com.fufelshmertzpakostincorporated.kawaicare.util.SensorFilterUtils;
 
 import java.io.File;
@@ -95,7 +99,7 @@ public class GestureMatcher implements SensorEventListener {
     /**
      * Set listener for gesture match events.
      */
-    public void setListener(GestureMatchListener listener) {
+    public void setListener(@Nullable GestureMatchListener listener) {
         this.listener = listener;
     }
 
@@ -170,7 +174,7 @@ public class GestureMatcher implements SensorEventListener {
      * @param event The motion event
      * @return true if gesture was matched
      */
-    public boolean onTouchEvent(MotionEvent event) {
+    public boolean onTouchEvent(@NonNull MotionEvent event) {
         if (!isMatching) return false;
 
         // Record touch frame
@@ -208,26 +212,13 @@ public class GestureMatcher implements SensorEventListener {
     // --- Private Methods ---
 
     private void loadStoredGesture() {
-        File gesturesDir = new File(context.getFilesDir(), "gestures");
-        if (!gesturesDir.exists()) {
-            hasCustomGesture = false;
-            return;
-        }
-
-        // Find the most recent gesture file
-        File[] files = gesturesDir.listFiles((dir, name) -> name.endsWith(".gesture"));
-        if (files == null || files.length == 0) {
+        // Use centralized GestureFileUtils to find newest gesture file
+        File newestFile = GestureFileUtils.getNewestGestureFile(context);
+        
+        if (newestFile == null) {
             hasCustomGesture = false;
             Log.d(TAG, "No stored gestures found");
             return;
-        }
-
-        // Sort by modification time, newest first
-        File newestFile = files[0];
-        for (File file : files) {
-            if (file.lastModified() > newestFile.lastModified()) {
-                newestFile = file;
-            }
         }
 
         // Load the gesture

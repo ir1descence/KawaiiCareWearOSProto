@@ -7,7 +7,27 @@
     android:clickable="true"
     android:focusable="true">
 
-    <!-- Main animation ImageView -->
+    <!-- 
+    Animation rendering options:
+    
+    Option 1: ImageView (current default)
+    - Simple integration with existing code
+    - Works well for most use cases
+    - Rendered on UI thread
+    
+    Option 2: AnimationSurfaceView (commented out)
+    - Better performance for complex animations
+    - Dedicated render thread
+    - Immune to orientation/layout changes
+    - Use when experiencing frame drops or rotation issues
+    
+    To switch to SurfaceView:
+    1. Comment out the ImageView below
+    2. Uncomment the AnimationSurfaceView
+    3. Update MainActivity to use AnimationSurfaceView instead of AnimationRenderer
+    -->
+
+    <!-- Main animation ImageView (default) -->
     <ImageView
         android:id="@+id/animation_image_view"
         android:layout_width="match_parent"
@@ -15,5 +35,12 @@
         android:scaleType="fitCenter"
         android:background="@android:color/transparent"
         android:contentDescription="@string/animation_description" />
+
+    <!-- Alternative: High-performance SurfaceView renderer (uncomment to use)
+    <com.fufelshmertzpakostincorporated.kawaicare.animation.AnimationSurfaceView
+        android:id="@+id/animation_surface_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+    -->
 
 </FrameLayout>

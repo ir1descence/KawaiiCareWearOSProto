@@ -11,7 +11,12 @@ import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.util.Log;
 
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
 import java.io.IOException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Utility class for managing alarm-related functionality.
@@ -48,6 +53,9 @@ public class AlarmManagerUtils {
     private final Handler mainHandler;
     private AlarmListener listener;
 
+    // ExecutorService for background sound loading (prevents memory leaks)
+    private final ExecutorService soundExecutor = Executors.newSingleThreadExecutor();
+
     // WakeLock for keeping screen on
     private PowerManager.WakeLock wakeLock;
 
@@ -75,7 +83,7 @@ public class AlarmManagerUtils {
     /**
      * Set the listener for alarm events.
      */
-    public void setListener(AlarmListener listener) {
+    public void setListener(@Nullable AlarmListener listener) {
         this.listener = listener;
     }
 
@@ -153,6 +161,9 @@ public class AlarmManagerUtils {
     public void release() {
         stopAlarm();
         
+        // Shutdown executor to prevent memory leaks
+        soundExecutor.shutdownNow();
+        
         if (mediaPlayer != null) {
             mediaPlayer.release();
             mediaPlayer = null;
@@ -201,8 +212,8 @@ public class AlarmManagerUtils {
     // --- Sound Management ---
 
     private void startAlarmSound() {
-        // Run on background thread to avoid blocking UI
-        new Thread(() -> {
+        // Run on background thread using managed ExecutorService to prevent memory leaks
+        soundExecutor.execute(() -> {
             try {
                 // Release previous player if exists
                 if (mediaPlayer != null) {
@@ -251,7 +262,7 @@ public class AlarmManagerUtils {
                 Log.e(TAG, "Error starting alarm sound", e);
                 mainHandler.post(() -> notifyAlarmError("Failed to play alarm sound: " + e.getMessage()));
             }
-        }).start();
+        });
     }
 
     private void setupMediaPlayer() {

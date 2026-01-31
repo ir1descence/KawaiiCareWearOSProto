@@ -283,11 +283,13 @@ public class SensorController implements SensorEventListener {
         }
         
         float gZ = values[2];
+        float absZ = Math.abs(gZ);
         TiltState state = currentTiltState.get();
         
         switch (state) {
             case STABLE:
-                if (gZ <= TILT_ENTER_THRESHOLD) {
+                // Treat higher |Z| (face-up) as "tilted" for Wear OS orientation
+                if (absZ >= TILT_EXIT_THRESHOLD) {
                     if (currentTiltState.compareAndSet(TiltState.STABLE, TiltState.TILTED)) {
                         lastTiltStateChangeTime = now;
                         final float zVal = gZ;
@@ -299,7 +301,7 @@ public class SensorController implements SensorEventListener {
                 break;
                 
             case TILTED:
-                if (gZ >= TILT_EXIT_THRESHOLD) {
+                if (absZ <= TILT_ENTER_THRESHOLD) {
                     if (currentTiltState.compareAndSet(TiltState.TILTED, TiltState.STABLE)) {
                         lastTiltStateChangeTime = now;
                         mainHandler.post(() -> {
