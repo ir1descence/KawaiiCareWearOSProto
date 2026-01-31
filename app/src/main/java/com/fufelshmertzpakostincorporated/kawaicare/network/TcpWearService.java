@@ -7,9 +7,11 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.net.ConnectivityManager;
+import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkInfo;
+import android.net.NetworkRequest;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
@@ -225,6 +227,9 @@ public class TcpWearService extends Service {
     // Handler for main thread operations
     private Handler mainHandler;
 
+    // Network callback for detecting IP changes
+    private ConnectivityManager.NetworkCallback networkCallback;
+
     // SecureRandom for generating pairing codes and tokens
     private final SecureRandom secureRandom = new SecureRandom();
 
@@ -252,8 +257,99 @@ public class TcpWearService extends Service {
         // Initialize NSD Helper
         nsdHelper = new NsdHelper(this);
 
+        // Register network callback for IP change detection
+        registerNetworkCallback();
+
         // Create notification channel for foreground service
         createNotificationChannel();
+    }
+
+    /**
+     * Register a network callback to detect IP address changes.
+     * When the IP changes (e.g., DHCP renewal), we refresh the NSD registration
+     * to ensure the service remains discoverable with the correct address.
+     */
+    private void registerNetworkCallback() {
+        if (connectivityManager == null) {
+            Log.w(TAG, "ConnectivityManager not available, cannot register network callback");
+            return;
+        }
+
+        // Get current IP to initialize the callback state (prevents false positive on registration)
+        final String initialIp = getLocalIpAddress();
+
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            private String lastKnownIp = initialIp;
+            private boolean pendingRefresh = false;
+            private boolean initialCallbackFired = false;
+
+            @Override
+            public void onAvailable(@NonNull Network network) {
+                // Skip the initial callback that fires immediately on registration
+                if (!initialCallbackFired) {
+                    initialCallbackFired = true;
+                    Log.d(TAG, "Network callback: initial onAvailable (skipped)");
+                    return;
+                }
+                Log.i(TAG, "Network became available (reconnection)");
+                scheduleNsdRefresh();
+            }
+
+            @Override
+            public void onLinkPropertiesChanged(@NonNull Network network, 
+                    @NonNull LinkProperties linkProperties) {
+                String newIp = getLocalIpAddress();
+                if (newIp != null && !newIp.equals(lastKnownIp)) {
+                    Log.i(TAG, "IP address changed from " + lastKnownIp + " to " + newIp);
+                    lastKnownIp = newIp;
+                    scheduleNsdRefresh();
+                }
+            }
+
+            @Override
+            public void onLost(@NonNull Network network) {
+                Log.w(TAG, "Network lost");
+                lastKnownIp = null;
+                pendingRefresh = false;
+            }
+
+            private void scheduleNsdRefresh() {
+                // Debounce: only schedule if no refresh is already pending
+                if (pendingRefresh) {
+                    Log.d(TAG, "NSD refresh already pending, skipping duplicate");
+                    return;
+                }
+                pendingRefresh = true;
+                
+                // Delay to let the network stabilize
+                mainHandler.postDelayed(() -> {
+                    pendingRefresh = false;
+                    if (isRunning.get() && isWifiConnected() && isServerSocketValid()) {
+                        Log.i(TAG, "Refreshing NSD registration due to network change");
+                        refreshNsdRegistration();
+                    } else {
+                        Log.d(TAG, "Skipping NSD refresh: server not ready");
+                    }
+                }, 3000); // 3 second delay to let network fully stabilize
+            }
+        };
+
+        try {
+            NetworkRequest request = new NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .build();
+            connectivityManager.registerNetworkCallback(request, networkCallback);
+            Log.i(TAG, "Network callback registered for Wi-Fi changes (initial IP: " + initialIp + ")");
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to register network callback", e);
+        }
+    }
+
+    /**
+     * Check if the server socket is valid and bound.
+     */
+    private boolean isServerSocketValid() {
+        return serverSocket != null && !serverSocket.isClosed() && serverSocket.getLocalPort() > 0;
     }
 
     /** Intent action to run connectivity diagnostic */
@@ -302,6 +398,18 @@ public class TcpWearService extends Service {
     @Override
     public void onDestroy() {
         Log.d(TAG, "TcpWearService onDestroy");
+        
+        // Unregister network callback
+        if (networkCallback != null && connectivityManager != null) {
+            try {
+                connectivityManager.unregisterNetworkCallback(networkCallback);
+                Log.d(TAG, "Network callback unregistered");
+            } catch (Exception e) {
+                Log.w(TAG, "Error unregistering network callback", e);
+            }
+            networkCallback = null;
+        }
+        
         stopServer();
         super.onDestroy();
     }
@@ -314,11 +422,15 @@ public class TcpWearService extends Service {
      * Start the TCP server on the specified port.
      * Handles port conflicts gracefully with retry logic.
      */
-    private void startServer(int port) {
-        if (isRunning.get()) {
-            Log.w(TAG, "Server already running");
+    private synchronized void startServer(int port) {
+        // Use compareAndSet for atomic check-and-set to prevent race conditions
+        // when service is started from multiple places (AlarmBootReceiver + MainActivity)
+        if (!isRunning.compareAndSet(false, true)) {
+            Log.w(TAG, "Server already running or starting, ignoring duplicate start request");
             return;
         }
+
+        Log.i(TAG, "Starting TCP server on port " + port);
 
         // Check Wi-Fi connectivity before starting
         if (!isWifiConnected()) {
@@ -337,6 +449,7 @@ public class TcpWearService extends Service {
         serverThread = new Thread(() -> {
             int maxRetries = 3;
             int retryDelayMs = 1000;
+            boolean serverStartedSuccessfully = false;
             
             for (int attempt = 1; attempt <= maxRetries; attempt++) {
                 try {
@@ -344,7 +457,7 @@ public class TcpWearService extends Service {
                     serverSocket = new ServerSocket();
                     serverSocket.setReuseAddress(true);
                     serverSocket.bind(new InetSocketAddress("0.0.0.0", port));
-                    isRunning.set(true);
+                    serverStartedSuccessfully = true;
 
                     int actualPort = serverSocket.getLocalPort();
                     String localIp = getLocalIpAddress();
@@ -412,7 +525,12 @@ public class TcpWearService extends Service {
                 }
             }
             
-            isRunning.set(false);
+            // Only set isRunning to false if we never started successfully
+            // (if we did start, isRunning was already true and this is a normal shutdown)
+            if (!serverStartedSuccessfully) {
+                Log.w(TAG, "Server failed to start, resetting isRunning flag");
+                isRunning.set(false);
+            }
         }, "TcpWearServer");
 
         serverThread.start();
@@ -424,12 +542,22 @@ public class TcpWearService extends Service {
      * Unregisters and re-registers the service with a fresh mDNS announcement.
      */
     private void refreshNsdRegistration() {
-        if (nsdHelper == null || serverSocket == null || serverSocket.isClosed()) {
-            Log.w(TAG, "Cannot refresh NSD: helper or server socket not available");
+        if (nsdHelper == null) {
+            Log.w(TAG, "Cannot refresh NSD: NsdHelper not available");
+            return;
+        }
+        
+        if (!isServerSocketValid()) {
+            Log.w(TAG, "Cannot refresh NSD: server socket not valid");
             return;
         }
 
         int port = serverSocket.getLocalPort();
+        if (port <= 0) {
+            Log.w(TAG, "Cannot refresh NSD: invalid port " + port);
+            return;
+        }
+        
         String uniqueServiceName = SERVICE_NAME + "-" + Build.MODEL.replace(" ", "_");
 
         Log.i(TAG, "Refreshing NSD registration for service: " + uniqueServiceName + " on port " + port);
