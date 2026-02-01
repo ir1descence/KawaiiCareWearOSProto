@@ -54,10 +54,12 @@ public class SensorController implements SensorEventListener {
     private static final float TILT_ENTER_THRESHOLD = 6.5f;  // Z-axis threshold to enter tilt
     private static final float TILT_EXIT_THRESHOLD = 7.5f;   // Z-axis threshold to exit tilt
     private static final long TILT_DEBOUNCE_MS = 300;
+    private static final long TILT_COOLDOWN_MS = 500;        // Minimum time between tilt callbacks
     
     private enum TiltState { STABLE, TILTED }
     private final AtomicReference<TiltState> currentTiltState = new AtomicReference<>(TiltState.STABLE);
     private volatile long lastTiltStateChangeTime = 0;
+    private volatile long lastTiltCallbackTime = 0;          // For cooldown enforcement
 
     // --- Shake Detection ---
     // Threshold for LINEAR_ACCELERATION (no gravity, so lower value)
@@ -270,6 +272,7 @@ public class SensorController implements SensorEventListener {
     
     /**
      * Handle tilt detection from accelerometer values.
+     * Implements hysteresis and debouncing/cooldown to prevent jittery state changes.
      */
     private void handleTiltDetection(float[] values, long now) {
         // Skip tilt detection while shaking
@@ -277,8 +280,13 @@ public class SensorController implements SensorEventListener {
             return;
         }
         
-        // Debounce
+        // Debounce: Ignore rapid sensor readings
         if (now - lastTiltStateChangeTime < TILT_DEBOUNCE_MS) {
+            return;
+        }
+        
+        // Cooldown: Limit callback frequency to prevent rapid state changes
+        if (now - lastTiltCallbackTime < TILT_COOLDOWN_MS) {
             return;
         }
         
@@ -292,6 +300,7 @@ public class SensorController implements SensorEventListener {
                 if (absZ >= TILT_EXIT_THRESHOLD) {
                     if (currentTiltState.compareAndSet(TiltState.STABLE, TiltState.TILTED)) {
                         lastTiltStateChangeTime = now;
+                        lastTiltCallbackTime = now;
                         final float zVal = gZ;
                         mainHandler.post(() -> {
                             if (listener != null) listener.onTiltDetected(zVal);
@@ -304,6 +313,7 @@ public class SensorController implements SensorEventListener {
                 if (absZ <= TILT_ENTER_THRESHOLD) {
                     if (currentTiltState.compareAndSet(TiltState.TILTED, TiltState.STABLE)) {
                         lastTiltStateChangeTime = now;
+                        lastTiltCallbackTime = now;
                         mainHandler.post(() -> {
                             if (listener != null) listener.onStable();
                         });
@@ -331,6 +341,7 @@ public class SensorController implements SensorEventListener {
     public void resetState() {
         currentTiltState.set(TiltState.STABLE);
         lastTiltStateChangeTime = 0;
+        lastTiltCallbackTime = 0;
         firstShakeImpulseTime = 0;
         lastShakeImpulseTime = 0;
         shakeTriggered = false;

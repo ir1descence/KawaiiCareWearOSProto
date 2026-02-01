@@ -9,16 +9,21 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Thread-safe Animation State Repository.
+ * Thread-safe Animation State Repository with FSM integration.
  * 
  * Supports two types of state changes:
- * 1. Local state changes (sensor/gesture) - immediate, no auto-return
- * 2. External state changes (TCP) - with optional auto-return to IDLE after duration
+ * 1. Local state changes (sensor/gesture) - managed through FSM with queueing
+ * 2. External state changes (TCP) - bypass FSM, block local changes
+ * 
+ * The FSM ensures:
+ * - Current animation completes before new one starts
+ * - Single-slot buffering (only latest queued emotion kept)
+ * - Configurable cooldown between animations
  * 
  * During external animations, sensor-based state changes are blocked
  * until the external animation completes.
  */
-public class AnimationStateRepository {
+public class AnimationStateRepository implements AnimationFSM.FSMListener {
     private static final String TAG = "AnimationStateRepo";
     
     private static AnimationStateRepository instance;
@@ -26,7 +31,10 @@ public class AnimationStateRepository {
     private final List<AnimationStateListener> listeners = new CopyOnWriteArrayList<>();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     
-    // External animation tracking
+    // FSM for managing animation transitions
+    private final AnimationFSM animationFSM;
+    
+    // External animation tracking (legacy support)
     private final AtomicBoolean isExternalAnimationActive = new AtomicBoolean(false);
     private volatile long externalAnimationStartTime = 0;
     private volatile long externalAnimationDuration = 0;
@@ -51,7 +59,10 @@ public class AnimationStateRepository {
         default void onExternalAnimationEnded() {}
     }
 
-    private AnimationStateRepository() {}
+    private AnimationStateRepository() {
+        animationFSM = new AnimationFSM();
+        animationFSM.setListener(this);
+    }
 
     public static synchronized AnimationStateRepository getInstance() {
         if (instance == null) {
@@ -62,12 +73,25 @@ public class AnimationStateRepository {
 
     /**
      * Set state from local source (sensor/gesture).
-     * Will be ignored if an external animation is active.
+     * The state change will be queued if an animation is currently playing.
+     * Only the latest queued state is kept (previous buffered states are discarded).
      * 
      * @param state The new animation state
-     * @return true if state was changed, false if blocked by external animation
+     * @return true if state was accepted (either started or buffered), false if blocked
      */
     public synchronized boolean setState(AnimationRenderer.AnimState state) {
+        return setState(state, 0);
+    }
+    
+    /**
+     * Set state from local source with known duration.
+     * The state change will be queued if an animation is currently playing.
+     * 
+     * @param state The new animation state
+     * @param durationMs Duration of this animation (0 = unknown, will be calculated)
+     * @return true if state was accepted (either started or buffered), false if blocked
+     */
+    public synchronized boolean setState(AnimationRenderer.AnimState state, long durationMs) {
         if (state == null) return false;
         
         // Block local state changes during external animations
@@ -76,7 +100,26 @@ public class AnimationStateRepository {
             return false;
         }
         
-        return setStateInternal(state);
+        // Delegate to FSM for proper queueing and timing
+        return animationFSM.requestEmotion(state, durationMs);
+    }
+    
+    /**
+     * Set state immediately, bypassing the FSM queue.
+     * Use this for high-priority states like ALARM that shouldn't wait.
+     * 
+     * @param state The new animation state
+     * @param durationMs Duration of this animation
+     */
+    public synchronized void setStateImmediate(AnimationRenderer.AnimState state, long durationMs) {
+        if (state == null) return;
+        
+        if (isExternalAnimationActive.get()) {
+            Log.d(TAG, "Immediate setState blocked - external animation active. Requested: " + state);
+            return;
+        }
+        
+        animationFSM.forceEmotion(state, durationMs);
     }
 
     /**
@@ -102,8 +145,8 @@ public class AnimationStateRepository {
         // Notify listeners that external animation started
         notifyExternalAnimationStarted();
         
-        // Set the state
-        setStateInternal(state);
+        // Use FSM's external animation mode
+        animationFSM.startExternalAnimation(state, durationMs);
         
         // Schedule auto-return to IDLE if duration specified
         if (durationMs > 0) {
@@ -173,8 +216,8 @@ public class AnimationStateRepository {
         
         Log.i(TAG, "External animation ended, returning to IDLE");
         
-        // Reset to IDLE
-        setStateInternal(AnimationRenderer.AnimState.IDLE);
+        // End the external animation in FSM
+        animationFSM.endExternalAnimation();
         
         // Notify listeners that external animation ended
         notifyExternalAnimationEnded();
@@ -195,7 +238,7 @@ public class AnimationStateRepository {
         Log.w(TAG, "Force reset to IDLE requested");
         cancelPendingExternalEnd();
         isExternalAnimationActive.set(false);
-        setStateInternal(AnimationRenderer.AnimState.IDLE);
+        animationFSM.forceResetToIdle();
         notifyExternalAnimationEnded();
     }
     
@@ -209,12 +252,77 @@ public class AnimationStateRepository {
         if (isExternalAnimationActive.getAndSet(false)) {
             Log.d(TAG, "External animation lock cleared (without state change)");
             cancelPendingExternalEnd();
+            animationFSM.endExternalAnimation();
             notifyExternalAnimationEnded();
         }
+    }
+    
+    /**
+     * Get the underlying FSM for advanced configuration.
+     * @return The AnimationFSM instance
+     */
+    public AnimationFSM getFSM() {
+        return animationFSM;
+    }
+    
+    /**
+     * Set the cooldown duration between animations.
+     * @param cooldownMs Duration in milliseconds (100-2000ms)
+     */
+    public void setCooldownDuration(long cooldownMs) {
+        animationFSM.setCooldownDuration(cooldownMs);
+    }
+    
+    /**
+     * Notify the FSM that an animation cycle has completed.
+     * Call this from the animation renderer's cycle callback.
+     */
+    public void notifyAnimationCycleComplete() {
+        animationFSM.notifyAnimationCycleComplete();
+    }
+    
+    /**
+     * Notify the FSM of the actual duration for the current animation.
+     * @param state The animation state
+     * @param durationMs Duration in milliseconds
+     */
+    public void notifyAnimationDuration(AnimationRenderer.AnimState state, long durationMs) {
+        animationFSM.notifyAnimationDuration(state, durationMs);
     }
 
     public AnimationRenderer.AnimState getState() {
         return currentState;
+    }
+
+    /**
+     * Centralized mapping of States to Asset Folder paths.
+     * Maps the abstract state enum to the concrete asset folder name.
+     */
+    public String getFolderPathForState(AnimationRenderer.AnimState state) {
+        if (state == null) return "blinks";
+        
+        switch (state) {
+            case IDLE:
+                return "blinks";
+            case TILTED:
+            case LOOK_LEFT:
+                return "looks_to_the_left";
+            case GESTURE_ACTION:
+                return "nod";
+            case SHAKE:
+                return "shake_smile";
+            case ALARM:
+                return "notification";
+            case LEARNING:
+            case LOOK_RIGHT:
+                return "looks_to_the_right";
+            case FRIGHT:
+                return "fright";
+            case NOTIFICATION_POSTPONE:
+                return "notification_postpone";
+            default:
+                return "blinks";
+        }
     }
 
     public void addListener(AnimationStateListener listener) {
@@ -287,5 +395,19 @@ public class AnimationStateRepository {
                 }
             });
         }
+    }
+    
+    // --- AnimationFSM.FSMListener Implementation ---
+    
+    @Override
+    public void onPlayAnimation(AnimationRenderer.AnimState emotion) {
+        Log.d(TAG, "FSM requested animation: " + emotion);
+        setStateInternal(emotion);
+    }
+    
+    @Override
+    public void onReturnToIdle() {
+        Log.d(TAG, "FSM returned to IDLE");
+        setStateInternal(AnimationRenderer.AnimState.IDLE);
     }
 }

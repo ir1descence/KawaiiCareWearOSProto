@@ -86,9 +86,7 @@ public class MainActivity extends Activity implements
     private boolean isGuestMode = true;
     
     // Animation Control Flags
-    private boolean isShakeAnimating = false;
     private String currentAnimationFolder = null; // Track current folder to prevent redundant loads
-    private volatile boolean isExternalAnimationActive = false; // Blocks sensor input during TCP animations
 
     // Learning Mode state
     private AnimationRenderer.AnimState stateBeforeLearning;
@@ -175,6 +173,7 @@ public class MainActivity extends Activity implements
 
         // 2. Initialize Animation Subsystem
         animationRenderer = new AnimationRenderer(this, imageView);
+        setupAnimationCallbacks();
         loadAssets();
 
         // 3. Initialize Sensor Controller (ALWAYS active - works in guest mode)
@@ -208,6 +207,35 @@ public class MainActivity extends Activity implements
 
         // 9. Start TCP Wear Service for network communication
         startTcpWearService();
+        
+        // 10. Configure Animation FSM cooldown (500ms between animations)
+        AnimationStateRepository.getInstance().setCooldownDuration(500);
+
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+    
+    /**
+     * Setup animation renderer callbacks for FSM integration.
+     * Connects animation cycle completion to the FSM for proper state transitions.
+     */
+    private void setupAnimationCallbacks() {
+        // Notify FSM when animation cycles complete
+        animationRenderer.setCycleCallback((state, cycleCount) -> {
+            Log.d(TAG, "Animation cycle complete: " + state + " (cycle " + cycleCount + ")");
+            
+            // For non-looping emotions (like reactions), notify FSM after first cycle
+            // For IDLE state, let it loop indefinitely without notifying
+            if (state != AnimationRenderer.AnimState.IDLE) {
+                AnimationStateRepository.getInstance().notifyAnimationCycleComplete();
+            }
+        });
+        
+        // Notify FSM when animation duration is calculated
+        animationRenderer.setDurationCallback((folderPath, durationMs, frameCount) -> {
+            Log.d(TAG, "Animation loaded: " + folderPath + " (" + frameCount + " frames, " + durationMs + "ms)");
+            AnimationRenderer.AnimState currentState = animationRenderer.getCurrentState();
+            AnimationStateRepository.getInstance().notifyAnimationDuration(currentState, durationMs);
+        });
     }
 
     /**
@@ -413,11 +441,11 @@ public class MainActivity extends Activity implements
 
     // Add this helper method to switch animations based on state
     private void setAnimationForState(AnimationRenderer.AnimState state) {
-        String folderPath = getFolderPathForState(state);
+        String folderPath = AnimationStateRepository.getInstance().getFolderPathForState(state);
         
         // Optimization: Only reload animation if folder actually changes
         // This prevents redundant bitmap decoding which causes CPU spikes
-        if (!folderPath.equals(currentAnimationFolder)) {
+        if (folderPath != null && !folderPath.equals(currentAnimationFolder)) {
             currentAnimationFolder = folderPath;
             animationRenderer.setFolderAnimation(folderPath, true);
         }
@@ -592,14 +620,15 @@ public class MainActivity extends Activity implements
         @Override
         public boolean onDoubleTap(MotionEvent e) {
             // Block if external animation is playing
-            if (isExternalAnimationActive) return true;
+            if (AnimationStateRepository.getInstance().isExternalAnimationActive()) return true;
             
             AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.GESTURE_ACTION);
 
             // Revert to IDLE after 2 seconds
             imageView.postDelayed(() -> {
                 // Only revert if still in GESTURE_ACTION (not overridden by TCP or sensor)
-                if (!isExternalAnimationActive && 
+                // Use the simplified check since we don't have local flags anymore
+                if (!AnimationStateRepository.getInstance().isExternalAnimationActive() && 
                     animationRenderer.getCurrentState() == AnimationRenderer.AnimState.GESTURE_ACTION) {
                     AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.IDLE);
                 }
@@ -619,31 +648,23 @@ public class MainActivity extends Activity implements
     @Override
     public void onTiltDetected(float zAxisValue) {
         if (gestureRecordingController.isRecording()) return;
-        if (isShakeAnimating) return; // Ignore tilt during shake animation
-        if (isExternalAnimationActive) return; // Ignore during TCP animation
-
-        if (animationRenderer.getCurrentState() == AnimationRenderer.AnimState.IDLE) {
-            // Use setState directly on AnimationRenderer for local changes
-            // AnimationStateRepository.setState() will be blocked during external animations anyway
-            AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.TILTED);
-        }
+        
+        // Let the Repository/FSM decide if we can transition
+        AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.TILTED);
     }
 
     @Override
     public void onStable() {
         if (gestureRecordingController.isRecording()) return;
-        if (isShakeAnimating) return; // Ignore stable during shake animation
-        if (isExternalAnimationActive) return; // Ignore during TCP animation
 
-        if (animationRenderer.getCurrentState() == AnimationRenderer.AnimState.TILTED) {
-            AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.IDLE);
-        }
+        // Let the Repository/FSM decide if we can transition
+        // If SHAKE is playing, FSM should block this or buffer it
+        AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.IDLE);
     }
 
     @Override
     public void onShakeStarted() {
         if (gestureRecordingController.isRecording()) return;
-        if (isExternalAnimationActive) return; // Ignore during TCP animation
         
         Log.d(TAG, "Shake STARTED - triggering shake animation");
 
@@ -655,7 +676,6 @@ public class MainActivity extends Activity implements
         }
 
         // Start shake animation
-        isShakeAnimating = true;
         AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.SHAKE);
     }
     
@@ -668,13 +688,12 @@ public class MainActivity extends Activity implements
     
     @Override
     public void onShakeEnded() {
-        if (!isShakeAnimating) return;
-        if (isExternalAnimationActive) return; // Don't interfere with TCP animation
+        if (gestureRecordingController.isRecording()) return;
         
         Log.d(TAG, "Shake ENDED - returning to appropriate state");
-        isShakeAnimating = false;
         
         // Return to state based on current sensor reading
+        // The FSM will buffer this state change if shake animation is still finishing its cycle
         if (sensorController.isTilted()) {
             AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.TILTED);
         } else {
@@ -695,25 +714,21 @@ public class MainActivity extends Activity implements
     @Override
     public void onExternalAnimationStarted() {
         Log.i(TAG, "External (TCP) animation started - blocking sensor input");
-        isExternalAnimationActive = true;
-        // Clear shake state if we were mid-shake
-        isShakeAnimating = false;
+        // Local flags removed - Repository handles state locking
     }
 
     @Override
     public void onExternalAnimationEnded() {
         Log.i(TAG, "External (TCP) animation ended - re-enabling sensor input");
-        isExternalAnimationActive = false;
+        // Local flags removed - Repository handles state locking
         
         // Sync with current sensor state after external animation ends
         // This ensures we don't get stuck in wrong state
         if (sensorController != null && !gestureRecordingController.isRecording()) {
             if (sensorController.isShaking()) {
-                // Unlikely but handle edge case
-                isShakeAnimating = true;
+                AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.SHAKE);
             } else if (sensorController.isTilted()) {
-                // Sensor reports tilt, but we just returned to IDLE
-                // Let the next sensor event handle it naturally
+                AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.TILTED);
             }
         }
     }
@@ -722,8 +737,8 @@ public class MainActivity extends Activity implements
 
     @Override
     public long getDurationForState(AnimationRenderer.AnimState state) {
-        // Map state to folder path (same mapping as setAnimationForState)
-        String folderPath = getFolderPathForState(state);
+        // Map state to folder path (using repository)
+        String folderPath = AnimationStateRepository.getInstance().getFolderPathForState(state);
         
         // Calculate duration based on frame count
         if (animationRenderer != null) {
@@ -735,37 +750,8 @@ public class MainActivity extends Activity implements
         return 0; // Will use default fallback
     }
     
-    /**
-     * Get the asset folder path for a given animation state.
-     * Centralizes the state-to-folder mapping.
-     */
-    private String getFolderPathForState(AnimationRenderer.AnimState state) {
-        switch (state) {
-            case IDLE:
-                return "blinks";
-            case TILTED:
-                return "looks_to_the_left";
-            case GESTURE_ACTION:
-                return "nod";
-            case SHAKE:
-                return "shake_smile";
-            case ALARM:
-                return "notification";
-            case LEARNING:
-                return "looks_to_the_right";
-            case FRIGHT:
-                return "fright";
-            case LOOK_LEFT:
-                return "looks_to_the_left";
-            case LOOK_RIGHT:
-                return "looks_to_the_right";
-            case NOTIFICATION_POSTPONE:
-                return "notification_postpone";
-            default:
-                return "blinks";
-        }
-    }
-
+    // getFolderPathForState removed - now handled in AnimationStateRepository
+    
     // --- GestureRecordingController.RecordingListener ---
 
     @Override

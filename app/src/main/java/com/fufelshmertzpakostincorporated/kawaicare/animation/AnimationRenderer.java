@@ -16,6 +16,8 @@ import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -80,6 +82,9 @@ public class AnimationRenderer {
     // Animation data
     private volatile String currentFolderPath;
     private final List<String> frameFiles = Collections.synchronizedList(new ArrayList<>());
+    
+    // Manifest cache to avoid repeated AssetManager.list() calls
+    private final Map<String, List<String>> folderManifestCache = new ConcurrentHashMap<>();
 
     // Memory-efficient LRU cache
     private LruCache<String, Bitmap> frameCache;
@@ -95,6 +100,12 @@ public class AnimationRenderer {
 
     // Animation duration callback
     private AnimationDurationCallback durationCallback;
+    
+    // Animation cycle completion callback
+    private AnimationCycleCallback cycleCallback;
+    
+    // Track if we should notify on cycle completion
+    private volatile boolean notifyOnCycleComplete = true;
 
     /**
      * Callback interface for notifying when animation duration is calculated.
@@ -102,6 +113,22 @@ public class AnimationRenderer {
     public interface AnimationDurationCallback {
         void onAnimationDurationCalculated(String folderPath, long durationMs, int frameCount);
     }
+    
+    /**
+     * Callback interface for notifying when an animation cycle completes.
+     * A cycle is one full playthrough of all frames in the current animation.
+     */
+    public interface AnimationCycleCallback {
+        /**
+         * Called when the animation loops back to frame 0.
+         * @param state The animation state that just completed a cycle
+         * @param cycleCount Total number of cycles completed since animation started
+         */
+        void onAnimationCycleComplete(AnimState state, int cycleCount);
+    }
+    
+    // Track cycle count for the current animation
+    private final AtomicInteger cycleCount = new AtomicInteger(0);
 
     public AnimationRenderer(Context context, ImageView targetView) {
         this.context = context.getApplicationContext();
@@ -151,6 +178,22 @@ public class AnimationRenderer {
      */
     public void setDurationCallback(AnimationDurationCallback callback) {
         this.durationCallback = callback;
+    }
+    
+    /**
+     * Set callback for animation cycle completion notifications.
+     */
+    public void setCycleCallback(AnimationCycleCallback callback) {
+        this.cycleCallback = callback;
+    }
+    
+    /**
+     * Enable or disable cycle completion notifications.
+     * When disabled, the animation still loops but doesn't notify.
+     * @param notify true to notify on cycle completion, false to disable
+     */
+    public void setNotifyOnCycleComplete(boolean notify) {
+        this.notifyOnCycleComplete = notify;
     }
 
     /**
@@ -269,6 +312,14 @@ public class AnimationRenderer {
 
     private void loadFramesList(String folderPath) {
         frameFiles.clear();
+        
+        // Check cache first
+        if (folderManifestCache.containsKey(folderPath)) {
+            frameFiles.addAll(folderManifestCache.get(folderPath));
+            Log.d(TAG, "Loaded " + frameFiles.size() + " frames from cache for " + folderPath);
+            return;
+        }
+        
         try {
             String[] files = context.getAssets().list(folderPath);
             if (files != null) {
@@ -281,6 +332,10 @@ public class AnimationRenderer {
                     }
                 }
                 Collections.sort(imageFiles); // Natural alphabetical order
+                
+                // Update cache
+                folderManifestCache.put(folderPath, new ArrayList<>(imageFiles));
+                
                 frameFiles.addAll(imageFiles);
                 Log.d(TAG, "Loaded " + frameFiles.size() + " frames from " + folderPath);
             }
@@ -346,6 +401,7 @@ public class AnimationRenderer {
         if (currentState != state) {
             currentState = state;
             currentFrameIndex.set(0);
+            cycleCount.set(0); // Reset cycle count on state change
             
             // Trigger immediate update if running
             if (isRunning.get()) {
@@ -419,9 +475,13 @@ public class AnimationRenderer {
         }
 
         int frameIndex = currentFrameIndex.get();
+        boolean cycleCompleted = false;
+        
         if (frameIndex >= fileCount) {
             frameIndex = 0;
             currentFrameIndex.set(0);
+            // Mark that we've completed a full cycle
+            cycleCompleted = true;
         }
 
         // Safe access with bounds check
@@ -457,6 +517,13 @@ public class AnimationRenderer {
             
             // Preload next frames in background
             preloadNextFrames(frameIndex + 1, PRELOAD_FRAME_COUNT);
+        }
+        
+        // Notify cycle completion after frame is displayed
+        if (cycleCompleted && notifyOnCycleComplete && cycleCallback != null) {
+            int cycles = cycleCount.incrementAndGet();
+            final AnimState stateAtCompletion = currentState;
+            mainHandler.post(() -> cycleCallback.onAnimationCycleComplete(stateAtCompletion, cycles));
         }
     }
 
