@@ -128,8 +128,8 @@ public class AnimationFSM {
      * Request a new emotion to be played.
      * 
      * Behavior depends on current FSM state:
-     * - IDLE: Start playing immediately
-     * - PLAYING/COOLDOWN: Buffer the emotion (replaces any previous buffered emotion)
+     * - IDLE: Start playing immediately (unless already playing IDLE)
+     * - PLAYING/COOLDOWN: Buffer the emotion (non-IDLE emotions have priority)
      * 
      * @param emotion The emotion/animation state to request
      * @param durationMs The duration of this animation in milliseconds
@@ -148,24 +148,41 @@ public class AnimationFSM {
         }
 
         FSMState state = currentFSMState.get();
-        Log.d(TAG, "Emotion requested: " + emotion + " (duration: " + durationMs + "ms) in state: " + state);
+        Log.d(TAG, "Emotion requested: " + emotion + " (duration: " + durationMs + "ms) in state: " + state + 
+                ", current: " + currentEmotion + ", buffered: " + bufferedEmotion);
 
         switch (state) {
             case IDLE:
+                // Skip if already in IDLE state and requesting IDLE
+                // This prevents unnecessary PLAYING transitions for the default state
+                if (emotion == AnimationRenderer.AnimState.IDLE && currentEmotion == AnimationRenderer.AnimState.IDLE) {
+                    Log.d(TAG, "Already in IDLE state, skipping redundant IDLE request");
+                    return true; // Accept but don't transition
+                }
                 // Immediately start the new emotion
                 startAnimation(emotion, durationMs);
                 return true;
 
             case PLAYING:
             case COOLDOWN:
-                // Buffer the emotion (replaces any previous buffered emotion)
-                // This implements the "only keep latest" strategy
+                // Priority-based buffering:
+                // - Non-IDLE emotions always override the buffer
+                // - IDLE only buffers if no other emotion is buffered (or current is IDLE)
                 AnimationRenderer.AnimState previousBuffer = bufferedEmotion;
+                
+                if (emotion == AnimationRenderer.AnimState.IDLE) {
+                    // IDLE request - only buffer if no important emotion is waiting
+                    if (previousBuffer != null && previousBuffer != AnimationRenderer.AnimState.IDLE) {
+                        Log.d(TAG, "IDLE request ignored - higher priority emotion buffered: " + previousBuffer);
+                        return false; // Don't override important buffered emotion with IDLE
+                    }
+                }
+                
                 bufferedEmotion = emotion;
                 
                 if (previousBuffer != null && previousBuffer != emotion) {
                     Log.d(TAG, "Replaced buffered emotion: " + previousBuffer + " -> " + emotion);
-                } else {
+                } else if (previousBuffer != emotion) {
                     Log.d(TAG, "Buffered emotion: " + emotion);
                 }
                 return true;
@@ -324,12 +341,16 @@ public class AnimationFSM {
     // --- Private State Transition Methods ---
 
     private void startAnimation(AnimationRenderer.AnimState emotion, long durationMs) {
+        FSMState previousState = currentFSMState.get();
+        AnimationRenderer.AnimState previousEmotion = currentEmotion;
+        
         currentFSMState.set(FSMState.PLAYING);
         currentEmotion = emotion;
         currentAnimationDurationMs = durationMs;
         animationStartTime = System.currentTimeMillis();
         
-        Log.i(TAG, "Starting animation: " + emotion + " (FSM -> PLAYING)");
+        Log.i(TAG, "Starting animation: " + emotion + " (FSM: " + previousState + " -> PLAYING, " +
+                "prev emotion: " + previousEmotion + ", duration: " + durationMs + "ms)");
         
         // Notify listener to start the animation
         if (listener != null) {
@@ -377,27 +398,41 @@ public class AnimationFSM {
     }
 
     private void onCooldownComplete() {
-        Log.d(TAG, "Cooldown complete");
+        Log.d(TAG, "Cooldown complete - checking buffer");
         
         // Check if there's a buffered emotion
         AnimationRenderer.AnimState nextEmotion = bufferedEmotion;
         bufferedEmotion = null;
         
         if (nextEmotion != null) {
-            Log.d(TAG, "Playing buffered emotion: " + nextEmotion);
-            // Start the buffered emotion (duration will be notified later)
-            startAnimation(nextEmotion, 0);
+            // Skip buffered IDLE if we're already going to return to IDLE anyway
+            if (nextEmotion == AnimationRenderer.AnimState.IDLE) {
+                Log.d(TAG, "Buffered emotion is IDLE - transitioning directly to IDLE state");
+                transitionToIdle();
+            } else {
+                Log.d(TAG, "Playing buffered emotion: " + nextEmotion);
+                // Start the buffered emotion (duration will be notified later)
+                startAnimation(nextEmotion, 0);
+            }
         } else {
             // No buffered emotion, return to IDLE
+            Log.d(TAG, "No buffered emotion - returning to IDLE");
             transitionToIdle();
         }
     }
 
     private void transitionToIdle() {
+        FSMState previousState = currentFSMState.get();
+        AnimationRenderer.AnimState previousEmotion = currentEmotion;
+        
         currentFSMState.set(FSMState.IDLE);
         currentEmotion = AnimationRenderer.AnimState.IDLE;
         
-        Log.d(TAG, "FSM -> IDLE");
+        Log.i(TAG, "FSM -> IDLE (from state: " + previousState + ", emotion: " + previousEmotion + 
+                ", buffer cleared: " + (bufferedEmotion != null) + ")");
+        
+        // Clear any stale buffer when transitioning to IDLE
+        bufferedEmotion = null;
         
         // Notify listener
         if (listener != null) {

@@ -217,16 +217,57 @@ public class MainActivity extends Activity implements
     /**
      * Setup animation renderer callbacks for FSM integration.
      * Connects animation cycle completion to the FSM for proper state transitions.
+     * 
+     * Animation types:
+     * - CONTINUOUS (TILTED, SHAKE): Loop while sensor condition persists, transition when condition ends
+     * - ONE-SHOT (GESTURE_ACTION, ALARM, etc.): Play once then return to previous/idle state
+     * - IDLE: Loop indefinitely (default state)
      */
     private void setupAnimationCallbacks() {
         // Notify FSM when animation cycles complete
         animationRenderer.setCycleCallback((state, cycleCount) -> {
             Log.d(TAG, "Animation cycle complete: " + state + " (cycle " + cycleCount + ")");
             
-            // For non-looping emotions (like reactions), notify FSM after first cycle
-            // For IDLE state, let it loop indefinitely without notifying
-            if (state != AnimationRenderer.AnimState.IDLE) {
+            // Determine if this is a continuous state that should loop while condition persists
+            boolean shouldContinueLooping = false;
+            
+            switch (state) {
+                case IDLE:
+                    // IDLE always loops indefinitely - never notify FSM
+                    shouldContinueLooping = true;
+                    break;
+                    
+                case TILTED:
+                case LOOK_LEFT:
+                case LOOK_RIGHT:
+                    // Tilt animations loop while device remains tilted
+                    shouldContinueLooping = sensorController != null && sensorController.isTilted();
+                    Log.d(TAG, "TILTED cycle complete - sensor still tilted: " + shouldContinueLooping);
+                    break;
+                    
+                case SHAKE:
+                    // Shake animation loops while device is being shaken
+                    shouldContinueLooping = sensorController != null && sensorController.isShaking();
+                    Log.d(TAG, "SHAKE cycle complete - sensor still shaking: " + shouldContinueLooping);
+                    break;
+                    
+                case LEARNING:
+                    // Learning mode loops while recording is active
+                    shouldContinueLooping = gestureRecordingController != null && gestureRecordingController.isRecording();
+                    break;
+                    
+                default:
+                    // One-shot animations (GESTURE_ACTION, ALARM, FRIGHT, etc.)
+                    // Play once then notify FSM to transition
+                    shouldContinueLooping = false;
+                    break;
+            }
+            
+            if (!shouldContinueLooping) {
+                Log.d(TAG, "Animation " + state + " ending - notifying FSM to transition");
                 AnimationStateRepository.getInstance().notifyAnimationCycleComplete();
+            } else {
+                Log.v(TAG, "Animation " + state + " continuing to loop (cycle " + cycleCount + ")");
             }
         });
         
@@ -649,6 +690,7 @@ public class MainActivity extends Activity implements
     public void onTiltDetected(float zAxisValue) {
         if (gestureRecordingController.isRecording()) return;
         
+        Log.d(TAG, "Tilt detected (z=" + zAxisValue + ") - requesting TILTED state");
         // Let the Repository/FSM decide if we can transition
         AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.TILTED);
     }
@@ -657,8 +699,10 @@ public class MainActivity extends Activity implements
     public void onStable() {
         if (gestureRecordingController.isRecording()) return;
 
+        Log.d(TAG, "Device stable - requesting IDLE state (will transition after current animation cycle)");
         // Let the Repository/FSM decide if we can transition
-        // If SHAKE is playing, FSM should block this or buffer it
+        // For continuous animations (TILTED, SHAKE), the cycle callback checks sensor state
+        // and will notify FSM to transition once the current cycle completes
         AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.IDLE);
     }
 
@@ -787,7 +831,7 @@ public class MainActivity extends Activity implements
         if (gestureRecordingController.isRecording()) return;
         
         // End any external animation first
-        if (isExternalAnimationActive) {
+        if (AnimationStateRepository.getInstance().isExternalAnimationActive()) {
             AnimationStateRepository.getInstance().endExternalAnimation();
         }
 
@@ -809,7 +853,7 @@ public class MainActivity extends Activity implements
 
     public void onAlarmTriggered() {
         // End any external animation and force alarm state
-        if (isExternalAnimationActive) {
+        if (AnimationStateRepository.getInstance().isExternalAnimationActive()) {
             AnimationStateRepository.getInstance().endExternalAnimation();
         }
         AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.ALARM);

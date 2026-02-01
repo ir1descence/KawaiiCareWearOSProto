@@ -106,6 +106,11 @@ public class AnimationRenderer {
     
     // Track if we should notify on cycle completion
     private volatile boolean notifyOnCycleComplete = true;
+    
+    // Pending state: queued state change that will apply after current cycle completes
+    private volatile AnimState pendingState = null;
+    private volatile String pendingFolderPath = null;
+    private final Object pendingStateLock = new Object();
 
     /**
      * Callback interface for notifying when animation duration is calculated.
@@ -254,19 +259,60 @@ public class AnimationRenderer {
 
     /**
      * Set animation from an assets folder.
-     * Loading is performed asynchronously.
+     * If an animation is currently playing mid-cycle, the folder change is queued
+     * and will apply after the current cycle completes (along with any pending state change).
      * 
      * @param assetsFolderPath Path in assets folder (e.g., "emotions/happy")
      * @param cacheFrames Ignored - LRU cache handles caching automatically
      */
     public void setFolderAnimation(String assetsFolderPath, boolean cacheFrames) {
+        setFolderAnimation(assetsFolderPath, cacheFrames, false);
+    }
+    
+    /**
+     * Set animation from an assets folder with optional immediate transition.
+     * 
+     * @param assetsFolderPath Path in assets folder (e.g., "emotions/happy")
+     * @param cacheFrames Ignored - LRU cache handles caching automatically  
+     * @param immediate If true, switch immediately without waiting for cycle to complete
+     */
+    public void setFolderAnimation(String assetsFolderPath, boolean cacheFrames, boolean immediate) {
         if (assetsFolderPath == null) return;
         
-        // Skip if same folder already loaded
-        if (assetsFolderPath.equals(currentFolderPath) && !frameFiles.isEmpty()) {
-            return;
+        // Skip if same folder already loaded (and not pending different)
+        synchronized (pendingStateLock) {
+            if (assetsFolderPath.equals(currentFolderPath) && !frameFiles.isEmpty() 
+                    && (pendingFolderPath == null || pendingFolderPath.equals(assetsFolderPath))) {
+                return;
+            }
         }
-
+        
+        int frameIndex = currentFrameIndex.get();
+        boolean isAtCycleStart = (frameIndex == 0) || !isRunning.get();
+        
+        if (immediate || isAtCycleStart) {
+            // Apply immediately
+            applyFolderChange(assetsFolderPath);
+        } else {
+            // Queue the folder change for end of current cycle
+            synchronized (pendingStateLock) {
+                String previousPending = pendingFolderPath;
+                pendingFolderPath = assetsFolderPath;
+                if (previousPending != null && !previousPending.equals(assetsFolderPath)) {
+                    Log.d(TAG, "Replaced pending folder: " + previousPending + " -> " + assetsFolderPath);
+                } else if (!assetsFolderPath.equals(previousPending)) {
+                    Log.d(TAG, "Queued pending folder: " + assetsFolderPath + " (current frame: " + frameIndex + ")");
+                }
+            }
+        }
+    }
+    
+    /**
+     * Internal method to actually apply a folder change.
+     */
+    private void applyFolderChange(String assetsFolderPath) {
+        Log.d(TAG, "Applying folder change: " + currentFolderPath + " -> " + assetsFolderPath);
+        
         final String previousFolder = currentFolderPath;
         currentFolderPath = assetsFolderPath;
         currentFrameIndex.set(0);
@@ -393,20 +439,112 @@ public class AnimationRenderer {
 
     /**
      * Changes the current animation state.
-     * Thread-safe. Resets frame index if state changed.
+     * The state change is queued and will apply after the current animation cycle completes.
+     * This ensures smooth transitions where each animation plays to completion.
+     * 
+     * Thread-safe. If called while animation is mid-cycle, the change is deferred.
+     * If animation is at frame 0 or not running, the change applies immediately.
+     * 
+     * @param state The new animation state to transition to
      */
     public void setState(AnimState state) {
+        setState(state, false);
+    }
+    
+    /**
+     * Changes the current animation state with optional immediate transition.
+     * 
+     * @param state The new animation state to transition to
+     * @param immediate If true, switch immediately without waiting for cycle to complete.
+     *                  Use this for high-priority interrupts like ALARM.
+     */
+    public void setState(AnimState state, boolean immediate) {
         if (state == null) return;
         
-        if (currentState != state) {
-            currentState = state;
-            currentFrameIndex.set(0);
-            cycleCount.set(0); // Reset cycle count on state change
-            
-            // Trigger immediate update if running
-            if (isRunning.get()) {
-                mainHandler.removeCallbacks(animationLoop);
-                mainHandler.post(animationLoop);
+        // Same state - no change needed
+        if (currentState == state) {
+            synchronized (pendingStateLock) {
+                // Clear any pending state if we're already in the target state
+                if (pendingState == state) {
+                    pendingState = null;
+                    pendingFolderPath = null;
+                }
+            }
+            return;
+        }
+        
+        int frameIndex = currentFrameIndex.get();
+        boolean isAtCycleStart = (frameIndex == 0) || !isRunning.get();
+        
+        if (immediate || isAtCycleStart) {
+            // Apply immediately - either forced or at natural transition point
+            applyStateChange(state);
+        } else {
+            // Queue the state change for end of current cycle
+            synchronized (pendingStateLock) {
+                AnimState previousPending = pendingState;
+                pendingState = state;
+                if (previousPending != null && previousPending != state) {
+                    Log.d(TAG, "Replaced pending state: " + previousPending + " -> " + state);
+                } else {
+                    Log.d(TAG, "Queued pending state: " + state + " (current frame: " + frameIndex + ")");
+                }
+            }
+        }
+    }
+    
+    /**
+     * Force an immediate state change, interrupting the current animation.
+     * Use sparingly - for high-priority states like ALARM.
+     * 
+     * @param state The new animation state
+     */
+    public void setStateImmediate(AnimState state) {
+        setState(state, true);
+    }
+    
+    /**
+     * Internal method to actually apply a state change.
+     */
+    private void applyStateChange(AnimState state) {
+        Log.d(TAG, "Applying state change: " + currentState + " -> " + state);
+        
+        currentState = state;
+        currentFrameIndex.set(0);
+        cycleCount.set(0);
+        
+        // Clear any pending state since we're transitioning now
+        synchronized (pendingStateLock) {
+            pendingState = null;
+            pendingFolderPath = null;
+        }
+        
+        // Trigger immediate update if running
+        if (isRunning.get()) {
+            mainHandler.removeCallbacks(animationLoop);
+            mainHandler.post(animationLoop);
+        }
+    }
+    
+    /**
+     * Check if there's a pending state change queued.
+     * @return The pending state, or null if no change is queued
+     */
+    public AnimState getPendingState() {
+        synchronized (pendingStateLock) {
+            return pendingState;
+        }
+    }
+    
+    /**
+     * Clear any pending state change without applying it.
+     */
+    public void clearPendingState() {
+        synchronized (pendingStateLock) {
+            if (pendingState != null) {
+                Log.d(TAG, "Cleared pending state: " + pendingState);
+                pendingState = null;
+                pendingFolderPath = null;
             }
         }
     }
@@ -482,6 +620,35 @@ public class AnimationRenderer {
             currentFrameIndex.set(0);
             // Mark that we've completed a full cycle
             cycleCompleted = true;
+            
+            // Check for pending state or folder change at cycle boundary
+            AnimState nextState;
+            String nextFolder;
+            synchronized (pendingStateLock) {
+                nextState = pendingState;
+                nextFolder = pendingFolderPath;
+                // Clear pending values now that we're processing them
+                pendingState = null;
+                pendingFolderPath = null;
+            }
+            
+            // Apply pending changes (folder first, then state)
+            if (nextFolder != null || nextState != null) {
+                Log.d(TAG, "Cycle complete - applying pending changes: folder=" + nextFolder + ", state=" + nextState);
+                
+                if (nextFolder != null) {
+                    applyFolderChange(nextFolder);
+                }
+                
+                if (nextState != null) {
+                    // Only update state fields, folder already handled above
+                    currentState = nextState;
+                    cycleCount.set(0);
+                    Log.d(TAG, "Applied pending state: " + nextState);
+                }
+                // Return early - the new animation will start on next frame tick
+                return;
+            }
         }
 
         // Safe access with bounds check
