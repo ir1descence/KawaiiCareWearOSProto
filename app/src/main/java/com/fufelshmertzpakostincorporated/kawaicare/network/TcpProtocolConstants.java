@@ -82,6 +82,19 @@ public final class TcpProtocolConstants {
     public static final String CMD_REQUEST_SIGNALS = "request_signals";
 
     /**
+     * Set emoji for the avatar eye-replacement animation.
+     * Payload: {"command":"set_emoji","emoji":"❤️"}
+     * Clear:   {"command":"set_emoji","emoji":""}
+     */
+    public static final String CMD_SET_EMOJI = "set_emoji";
+
+    /**
+     * Request list of available emojis for the eye-replacement animation.
+     * Payload: {"command":"request_available_emojis"}
+     */
+    public static final String CMD_REQUEST_AVAILABLE_EMOJIS = "request_available_emojis";
+
+    /**
      * Ping for connection keepalive.
      * Payload: {"command":"ping","timestamp":1234567890}
      */
@@ -111,6 +124,9 @@ public final class TcpProtocolConstants {
 
     /** Signal validation error */
     public static final String RESP_VALIDATION_ERROR = "validation_error";
+
+    /** Available emojis list (for eye-replacement animation) */
+    public static final String RESP_AVAILABLE_EMOJIS = "available_emojis";
 
     /** Pong response to ping */
     public static final String RESP_PONG = "pong";
@@ -154,6 +170,12 @@ public final class TcpProtocolConstants {
 
     /** Emotions array field */
     public static final String FIELD_EMOTIONS = "emotions";
+
+    /** Emoji field (Unicode emoji string) */
+    public static final String FIELD_EMOJI = "emoji";
+
+    /** Emojis array field (available emoji list) */
+    public static final String FIELD_EMOJIS = "emojis";
 
     /** Signals array field */
     public static final String FIELD_SIGNALS = "signals";

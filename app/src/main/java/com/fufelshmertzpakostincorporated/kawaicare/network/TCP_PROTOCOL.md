@@ -75,12 +75,24 @@ The `TcpWearService` replaces Google's WearableListenerService (Data Layer/Messa
   }
 ```
 
+### Step 3a: Cancel Pairing (optional)
+The client can cancel an in-progress pairing at any time. This clears the challenge on the watch and dismisses the pairing code dialog.
+```json
+→ {"command": "pair", "step": "cancel"}
+← {
+    "type": "pairing_cancelled",
+    "message": "Pairing cancelled.",
+    "timestamp": 1234567890
+  }
+```
+
 ### Pairing Errors
 ```json
 ← {"type": "pairing_failed", "error_code": "INVALID_CODE", "error_message": "Incorrect pairing code.", "timestamp": 1234567890}
 ← {"type": "pairing_failed", "error_code": "PAIRING_EXPIRED", "error_message": "Pairing code has expired.", "timestamp": 1234567890}
 ← {"type": "error", "error_code": "PAIRING_IN_PROGRESS", "error_message": "Another device is currently pairing", "timestamp": 1234567890}
 ← {"type": "error", "error_code": "ALREADY_PAIRED", "error_message": "Device is already paired.", "timestamp": 1234567890}
+← {"type": "error", "error_code": "NO_PAIRING_INITIATED", "error_message": "No pairing challenge initiated by this client.", "timestamp": 1234567890}
 ```
 
 ---
@@ -438,6 +450,7 @@ With explicit duration:
 - `SHAKE` - Shake animation
 - `ALARM` - Alarm active animation
 - `LEARNING` - Gesture recording mode animation
+- `NOTIFICATION_EMOJI` - Emoji eye-replacement animation (requires emoji to be set via `set_emoji`)
 
 **Important:** During an external animation:
 - Sensor-based state changes (tilt/shake) are blocked
@@ -475,7 +488,67 @@ Supported signals:
 ← {"type": "emotions", "emotions": ["happy", "sad", "idle", "sleeping"], "timestamp": 1234567890}
 ```
 
-#### 6. Request Supported Signals
+#### 6. Set Emoji (Eye-Replacement Animation)
+
+Set the emoji that replaces the avatar's eyes during the `NOTIFICATION_EMOJI` animation.
+
+**Set emoji:**
+```json
+→ {"command": "set_emoji", "token": "...", "emoji": "😍"}
+← {"type": "success", "message": "Emoji set to: 😍", "timestamp": 1234567890}
+```
+
+**Set emoji and play animation immediately:**
+```json
+→ {"command": "set_emoji", "token": "...", "emoji": "❤️", "play": true}
+← {"type": "success", "message": "Emoji set to: ❤️ (animation playing)", "timestamp": 1234567890}
+```
+
+**Set emoji, play with explicit duration:**
+```json
+→ {"command": "set_emoji", "token": "...", "emoji": "🌟", "play": true, "duration": 5000}
+← {"type": "success", "message": "Emoji set to: 🌟 (animation playing)", "timestamp": 1234567890}
+```
+
+**Clear emoji:**
+```json
+→ {"command": "set_emoji", "token": "...", "emoji": ""}
+← {"type": "success", "message": "Emoji cleared", "timestamp": 1234567890}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `emoji` | string | Yes | Unicode emoji string (e.g. "😍"), or empty string to clear |
+| `play` | boolean | No | If true, immediately trigger the NOTIFICATION_EMOJI animation. Default: false |
+| `duration` | number | No | Duration in ms when `play` is true. 0 = auto-calculate from frames. Default: 0 |
+
+**Animation Flow:**
+1. Avatar blinks (eyes close) — `notification_emoji_before_blink` frames
+2. Emoji appears where eyes were — composited overlay during configurable frame range
+3. Emoji disappears — end of overlay zone
+4. Avatar opens eyes — `notification_emoji_after_blink` frames
+5. Cooldown period (1500ms default) before next emoji animation
+
+**Errors:**
+- `EMOJI_RENDER_FAILED` — Failed to render the emoji character to bitmap
+
+#### 7. Request Available Emojis
+
+Get the curated list of emojis suitable for the eye-replacement animation.
+
+```json
+→ {"command": "request_available_emojis", "token": "..."}
+← {
+    "type": "available_emojis",
+    "emojis": ["❤️", "😍", "🥰", "😊", "🌟", "⭐", "✨", "💖", "💕", "💗", ...],
+    "current_emoji": "😍",
+    "timestamp": 1234567890
+  }
+```
+
+The `current_emoji` field is only present if an emoji is currently selected.
+
+#### 8. Request Supported Signals
 ```json
 → {"command": "request_signals", "token": "..."}
 ← {
@@ -486,7 +559,7 @@ Supported signals:
   }
 ```
 
-#### 7. Get Status
+#### 9. Get Status
 ```json
 → {"command": "get_status", "token": "..."}
 ← {
@@ -500,7 +573,7 @@ Supported signals:
   }
 ```
 
-#### 8. Request Logout (Remote Logout)
+#### 10. Request Logout (Remote Logout)
 ```json
 → {"command": "request_logout", "token": "..."}
 ← {

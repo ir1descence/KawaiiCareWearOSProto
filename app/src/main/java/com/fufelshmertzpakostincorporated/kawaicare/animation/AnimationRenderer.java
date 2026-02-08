@@ -52,13 +52,15 @@ public class AnimationRenderer {
         FRIGHT,         // Scared/frightened emotion
         LOOK_LEFT,      // Looking to the left
         LOOK_RIGHT,     // Looking to the right
-        NOTIFICATION_POSTPONE  // Postponed notification animation
+        NOTIFICATION_POSTPONE,  // Postponed notification animation
+        NOTIFICATION_EMOJI      // Emoji overlay animation (blink → emoji → unblink)
     }
 
     // Animation modes
     public enum AnimationMode {
-        COMPOSITOR,  // Legacy mode using FaceCompositor
-        FOLDER       // New mode using complete images from folder
+        COMPOSITOR,      // Legacy mode using FaceCompositor
+        FOLDER,          // New mode using complete images from folder
+        EMOJI_OVERLAY    // Emoji mode: two-phase animation with emoji composited on top
     }
 
     // Configuration
@@ -97,6 +99,10 @@ public class AnimationRenderer {
     private Face face;
     private FaceCompositor compositor;
     private AnimationMode mode = AnimationMode.FOLDER;
+
+    // Emoji overlay compositor
+    private EmojiCompositor emojiCompositor;
+    private int emojiFrameIndex = 0;
 
     // Animation duration callback
     private AnimationDurationCallback durationCallback;
@@ -356,6 +362,48 @@ public class AnimationRenderer {
         setFolderAnimation(assetsFolderPath, true);
     }
 
+    /**
+     * Switch to emoji overlay animation mode.
+     * Uses the {@link EmojiCompositor} to play a two-phase blink animation
+     * (before-blink → emoji overlay → after-blink) as a single sequence.
+     *
+     * @param compositor An initialized EmojiCompositor with emoji bitmap set
+     */
+    public void setEmojiAnimation(EmojiCompositor compositor) {
+        if (compositor == null || !compositor.isInitialized()) {
+            Log.w(TAG, "Cannot set emoji animation: compositor not ready");
+            return;
+        }
+        this.emojiCompositor = compositor;
+        this.mode = AnimationMode.EMOJI_OVERLAY;
+        this.emojiFrameIndex = 0;
+        this.currentFrameIndex.set(0);
+        this.cycleCount.set(0);
+
+        // Clear folder-mode data to avoid confusion
+        this.face = null;
+        this.compositor = null;
+
+        // Notify duration callback with total emoji animation duration
+        if (durationCallback != null) {
+            long duration = emojiCompositor.getTotalDurationMs();
+            int frameCount = emojiCompositor.getTotalFrameCount();
+            mainHandler.post(() ->
+                    durationCallback.onAnimationDurationCalculated(
+                            "emoji_animation", duration, frameCount));
+        }
+
+        Log.i(TAG, "Emoji animation mode set: " + compositor.getTotalFrameCount() + " frames");
+    }
+
+    /**
+     * Get the current EmojiCompositor (if in emoji mode).
+     * @return The compositor, or null if not in emoji mode
+     */
+    public EmojiCompositor getEmojiCompositor() {
+        return mode == AnimationMode.EMOJI_OVERLAY ? emojiCompositor : null;
+    }
+
     private void loadFramesList(String folderPath) {
         frameFiles.clear();
         
@@ -589,11 +637,106 @@ public class AnimationRenderer {
     };
 
     private void renderNextFrame() {
-        if (mode == AnimationMode.FOLDER) {
+        if (mode == AnimationMode.EMOJI_OVERLAY) {
+            renderEmojiFrame();
+        } else if (mode == AnimationMode.FOLDER) {
             renderFolderFrame();
         } else {
             renderCompositorFrame();
         }
+    }
+
+    /**
+     * Render a frame in emoji overlay mode.
+     * Plays the combined before-blink + after-blink sequence as a one-shot animation,
+     * compositing the emoji bitmap during the visible frame range.
+     */
+    private void renderEmojiFrame() {
+        if (emojiCompositor == null || !emojiCompositor.isInitialized()) {
+            return;
+        }
+
+        ImageView targetView = targetViewRef.get();
+        if (targetView == null) {
+            stop();
+            return;
+        }
+
+        int totalFrames = emojiCompositor.getTotalFrameCount();
+        boolean cycleCompleted = false;
+
+        if (emojiFrameIndex >= totalFrames) {
+            // Full sequence played: mark cycle complete, wrap to 0
+            emojiFrameIndex = 0;
+            cycleCompleted = true;
+        }
+
+        // Get the asset path for the current frame from the compositor
+        String framePath = emojiCompositor.getFramePath(emojiFrameIndex);
+        if (framePath == null) {
+            emojiFrameIndex++;
+            return;
+        }
+
+        // Load the base frame (body without eyes)
+        Bitmap baseFrame = frameCache.get(framePath);
+        if (baseFrame == null || baseFrame.isRecycled()) {
+            baseFrame = loadBitmapFromAssets(framePath);
+            if (baseFrame != null) {
+                frameCache.put(framePath, baseFrame);
+            }
+        }
+
+        if (baseFrame != null && !baseFrame.isRecycled()) {
+            // Composite emoji onto the base frame if in the visible range
+            Bitmap composedFrame = emojiCompositor.composeFrame(baseFrame, emojiFrameIndex);
+            if (composedFrame != null && !composedFrame.isRecycled()) {
+                displayFrame(targetView, composedFrame);
+            } else {
+                displayFrame(targetView, baseFrame);
+            }
+        }
+
+        emojiFrameIndex++;
+
+        // Preload next frames in background
+        preloadEmojiFrames(emojiFrameIndex, PRELOAD_FRAME_COUNT);
+
+        // Notify cycle completion (one-shot: after full sequence)
+        if (cycleCompleted && notifyOnCycleComplete && cycleCallback != null) {
+            int cycles = cycleCount.incrementAndGet();
+            final AnimState stateAtCompletion = currentState;
+            mainHandler.post(() -> cycleCallback.onAnimationCycleComplete(stateAtCompletion, cycles));
+        }
+    }
+
+    /**
+     * Preload upcoming emoji animation frames in background.
+     */
+    private void preloadEmojiFrames(int startIndex, int count) {
+        if (loadingHandler == null || emojiCompositor == null) return;
+
+        final EmojiCompositor comp = emojiCompositor;
+        final int totalFrames = comp.getTotalFrameCount();
+
+        loadingHandler.post(() -> {
+            if (!isRunning.get() || mode != AnimationMode.EMOJI_OVERLAY) return;
+
+            for (int i = 0; i < count; i++) {
+                if (mode != AnimationMode.EMOJI_OVERLAY) return;
+
+                int index = (startIndex + i) % totalFrames;
+                String path = comp.getFramePath(index);
+                if (path != null && frameCache.get(path) == null) {
+                    Bitmap frame = loadBitmapFromAssets(path);
+                    if (frame != null && mode == AnimationMode.EMOJI_OVERLAY) {
+                        frameCache.put(path, frame);
+                    } else if (frame != null) {
+                        frame.recycle();
+                    }
+                }
+            }
+        });
     }
 
     private void renderFolderFrame() {

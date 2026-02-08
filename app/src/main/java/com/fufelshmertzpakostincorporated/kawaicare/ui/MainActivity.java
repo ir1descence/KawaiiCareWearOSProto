@@ -34,6 +34,8 @@ import com.fufelshmertzpakostincorporated.kawaicare.sensor.SensorController;
 import com.fufelshmertzpakostincorporated.kawaicare.recording.GestureRecordingController;
 import com.fufelshmertzpakostincorporated.kawaicare.animation.AnimationRenderer;
 import com.fufelshmertzpakostincorporated.kawaicare.animation.AnimationStateRepository;
+import com.fufelshmertzpakostincorporated.kawaicare.animation.EmojiCompositor;
+import com.fufelshmertzpakostincorporated.kawaicare.animation.EmojiRegistry;
 import com.google.android.gms.wearable.MessageClient;
 import com.google.android.gms.wearable.MessageEvent;
 import com.google.android.gms.wearable.Wearable;
@@ -87,6 +89,9 @@ public class MainActivity extends Activity implements
     
     // Animation Control Flags
     private String currentAnimationFolder = null; // Track current folder to prevent redundant loads
+
+    // Emoji overlay compositor for eye-replacement animation
+    private EmojiCompositor emojiCompositor;
 
     // Learning Mode state
     private AnimationRenderer.AnimState stateBeforeLearning;
@@ -176,6 +181,10 @@ public class MainActivity extends Activity implements
         setupAnimationCallbacks();
         loadAssets();
 
+        // 2b. Initialize Emoji Compositor for eye-replacement animation
+        emojiCompositor = new EmojiCompositor(this);
+        emojiCompositor.initialize();
+
         // 3. Initialize Sensor Controller (ALWAYS active - works in guest mode)
         sensorController = new SensorController(this);
         sensorController.setListener(this);
@@ -254,6 +263,15 @@ public class MainActivity extends Activity implements
                 case LEARNING:
                     // Learning mode loops while recording is active
                     shouldContinueLooping = gestureRecordingController != null && gestureRecordingController.isRecording();
+                    break;
+
+                case NOTIFICATION_EMOJI:
+                    // Emoji animation is one-shot: play the full before-blink + after-blink
+                    // sequence once, then return to IDLE. Mark cooldown on the compositor.
+                    shouldContinueLooping = false;
+                    if (emojiCompositor != null) {
+                        emojiCompositor.markAnimationComplete();
+                    }
                     break;
                     
                 default:
@@ -447,6 +465,9 @@ public class MainActivity extends Activity implements
     private void onPairingComplete() {
         Log.i(TAG, "Pairing completed successfully");
         
+        // Ensure pairing dialog is dismissed
+        dismissPairingCodeDialog();
+        
         // Update auth state
         isGuestMode = false;
         
@@ -463,6 +484,9 @@ public class MainActivity extends Activity implements
      */
     private void onRemoteLogout() {
         Log.i(TAG, "Remote logout received");
+        
+        // Ensure pairing dialog is dismissed
+        dismissPairingCodeDialog();
         
         // Update auth state
         isGuestMode = true;
@@ -527,6 +551,12 @@ public class MainActivity extends Activity implements
 
     // Add this helper method to switch animations based on state
     private void setAnimationForState(AnimationRenderer.AnimState state) {
+        if (state == AnimationRenderer.AnimState.NOTIFICATION_EMOJI) {
+            // Emoji animation uses the EmojiCompositor (two-phase blink + overlay)
+            handleEmojiAnimationStart();
+            return;
+        }
+
         String folderPath = AnimationStateRepository.getInstance().getFolderPathForState(state);
         
         // Optimization: Only reload animation if folder actually changes
@@ -536,6 +566,40 @@ public class MainActivity extends Activity implements
             animationRenderer.setFolderAnimation(folderPath, true);
         }
         animationRenderer.setState(state);
+    }
+
+    /**
+     * Start the emoji overlay animation.
+     * Feeds the EmojiCompositor (with the currently selected emoji) into the renderer.
+     */
+    private void handleEmojiAnimationStart() {
+        EmojiRegistry registry = EmojiRegistry.getInstance();
+        if (!registry.hasEmoji()) {
+            Log.w(TAG, "NOTIFICATION_EMOJI requested but no emoji selected — falling back to ALARM");
+            setAnimationForState(AnimationRenderer.AnimState.ALARM);
+            return;
+        }
+        if (emojiCompositor == null || !emojiCompositor.isInitialized()) {
+            Log.w(TAG, "EmojiCompositor not initialized — falling back to ALARM");
+            setAnimationForState(AnimationRenderer.AnimState.ALARM);
+            return;
+        }
+        if (emojiCompositor.isInCooldown()) {
+            Log.d(TAG, "Emoji animation in cooldown (" + emojiCompositor.getRemainingCooldownMs()
+                    + "ms remaining) — falling back to ALARM");
+            setAnimationForState(AnimationRenderer.AnimState.ALARM);
+            return;
+        }
+
+        // Configure compositor with current emoji
+        emojiCompositor.setEmojiBitmap(registry.getCurrentEmojiBitmap());
+        emojiCompositor.startAnimation();
+
+        // Switch renderer to emoji mode
+        currentAnimationFolder = null; // Reset folder tracking
+        animationRenderer.setEmojiAnimation(emojiCompositor);
+        animationRenderer.setState(AnimationRenderer.AnimState.NOTIFICATION_EMOJI, true);
+        Log.i(TAG, "Emoji animation started: " + registry.getCurrentEmoji());
     }
 
     // --- Lifecycle ---
@@ -826,6 +890,13 @@ public class MainActivity extends Activity implements
 
     @Override
     public long getDurationForState(AnimationRenderer.AnimState state) {
+        // Emoji animation has its own duration from the compositor
+        if (state == AnimationRenderer.AnimState.NOTIFICATION_EMOJI && emojiCompositor != null) {
+            long duration = emojiCompositor.getTotalDurationMs();
+            Log.d(TAG, "Calculated duration for NOTIFICATION_EMOJI: " + duration + "ms");
+            return duration;
+        }
+
         // Map state to folder path (using repository)
         String folderPath = AnimationStateRepository.getInstance().getFolderPathForState(state);
         

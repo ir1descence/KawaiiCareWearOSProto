@@ -34,6 +34,7 @@ import com.fufelshmertzpakostincorporated.kawaicare.R;
 import com.fufelshmertzpakostincorporated.kawaicare.alarm.SignalRegistry;
 import com.fufelshmertzpakostincorporated.kawaicare.animation.AnimationRenderer;
 import com.fufelshmertzpakostincorporated.kawaicare.animation.AnimationStateRepository;
+import com.fufelshmertzpakostincorporated.kawaicare.animation.EmojiRegistry;
 import com.fufelshmertzpakostincorporated.kawaicare.auth.SessionManager;
 import com.fufelshmertzpakostincorporated.kawaicare.data.AlarmStatusRepository;
 import com.fufelshmertzpakostincorporated.kawaicare.event.EventPayload;
@@ -116,6 +117,7 @@ public class TcpWearService extends Service {
     // Pairing Steps
     public static final String PAIR_STEP_CHALLENGE = "challenge";
     public static final String PAIR_STEP_VERIFY = "verify";
+    public static final String PAIR_STEP_CANCEL = "cancel";
 
     // New Event-based Commands (v2.0)
     public static final String CMD_SYNC_EVENTS = "sync_events";
@@ -130,6 +132,8 @@ public class TcpWearService extends Service {
     public static final String CMD_STOP_RECORDING = "stop_recording";
     public static final String CMD_REQUEST_EMOTIONS = "request_emotions";
     public static final String CMD_REQUEST_SIGNALS = "request_signals";
+    public static final String CMD_SET_EMOJI = "set_emoji";
+    public static final String CMD_REQUEST_AVAILABLE_EMOJIS = "request_available_emojis";
     public static final String CMD_PING = "ping";
     public static final String CMD_GET_STATUS = "get_status";
     public static final String CMD_REQUEST_LOGOUT = "request_logout";
@@ -140,12 +144,14 @@ public class TcpWearService extends Service {
     public static final String RESP_EMOTIONS = "emotions";
     public static final String RESP_SIGNALS = "signals";
     public static final String RESP_VALIDATION_ERROR = "validation_error";
+    public static final String RESP_AVAILABLE_EMOJIS = "available_emojis";
     public static final String RESP_PONG = "pong";
     public static final String RESP_STATUS = "status";
     public static final String RESP_AUTH_STATUS = "auth_status";
     public static final String RESP_PAIRING_CHALLENGE = "pairing_challenge";
     public static final String RESP_PAIRING_SUCCESS = "pairing_success";
     public static final String RESP_PAIRING_FAILED = "pairing_failed";
+    public static final String RESP_PAIRING_CANCELLED = "pairing_cancelled";
     public static final String RESP_LOGOUT_SUCCESS = "logout_success";
     public static final String RESP_UNAUTHORIZED = "unauthorized";
     
@@ -1184,6 +1190,14 @@ public class TcpWearService extends Service {
                     handleRequestSignals();
                     break;
 
+                case CMD_SET_EMOJI:
+                    handleSetEmoji(message);
+                    break;
+
+                case CMD_REQUEST_AVAILABLE_EMOJIS:
+                    handleRequestAvailableEmojis();
+                    break;
+
                 case CMD_GET_STATUS:
                     handleGetStatus();
                     break;
@@ -1219,9 +1233,13 @@ public class TcpWearService extends Service {
                     handlePairingVerify(code);
                     break;
 
+                case PAIR_STEP_CANCEL:
+                    handlePairingCancel();
+                    break;
+
                 default:
                     sendError("INVALID_PAIRING_STEP", 
-                            "Invalid pairing step. Use 'challenge' or 'verify'.");
+                            "Invalid pairing step. Use 'challenge', 'verify', or 'cancel'.");
                     break;
             }
         }
@@ -1330,6 +1348,41 @@ public class TcpWearService extends Service {
                 } else {
                     Log.w(TAG, "Invalid pairing code provided by " + clientAddress);
                     sendPairingFailed("INVALID_CODE", "Incorrect pairing code. Please try again.");
+                }
+            }
+        }
+
+        /**
+         * Handle pairing cancellation - client aborts the pairing flow.
+         * Clears the active challenge and dismisses the code dialog on the watch.
+         */
+        private void handlePairingCancel() {
+            synchronized (pairingLock) {
+                if (pairingClient != this) {
+                    sendError("NO_PAIRING_INITIATED",
+                            "No pairing challenge initiated by this client.");
+                    return;
+                }
+
+                Log.i(TAG, "Pairing cancelled by client: " + clientAddress);
+
+                // Clear pairing state
+                currentPairingCode = null;
+                pairingCodeTimestamp = 0;
+                pairingClient = null;
+
+                // Dismiss pairing dialog on the watch
+                broadcastToMainActivity(ACTION_DISMISS_PAIRING_CODE);
+
+                // Send confirmation to client
+                try {
+                    JSONObject response = new JSONObject();
+                    response.put("type", RESP_PAIRING_CANCELLED);
+                    response.put("message", "Pairing cancelled.");
+                    response.put("timestamp", System.currentTimeMillis());
+                    sendJson(response);
+                } catch (JSONException e) {
+                    Log.e(TAG, "Error creating pairing cancelled response", e);
                 }
             }
         }
@@ -1564,6 +1617,9 @@ public class TcpWearService extends Service {
                     return AnimationRenderer.AnimState.ALARM;
                 case "notification_postpone":
                     return AnimationRenderer.AnimState.NOTIFICATION_POSTPONE;
+                case "notification_emoji":
+                case "emoji":
+                    return AnimationRenderer.AnimState.NOTIFICATION_EMOJI;
                 case "fright":
                     return AnimationRenderer.AnimState.FRIGHT;
                 default:
@@ -1654,6 +1710,78 @@ public class TcpWearService extends Service {
         private void handleRequestEmotions() {
             Log.d(TAG, "Emotions list requested");
             sendAvailableEmotions();
+        }
+
+        /**
+         * Handle the set_emoji command.
+         * Sets the emoji for the avatar eye-replacement animation.
+         * 
+         * Payload: {"command":"set_emoji","token":"...","emoji":"😍"}
+         * Clear:   {"command":"set_emoji","token":"...","emoji":""}
+         * 
+         * Optionally trigger the NOTIFICATION_EMOJI animation immediately:
+         *   {"command":"set_emoji","token":"...","emoji":"😍","play":true}
+         *   {"command":"set_emoji","token":"...","emoji":"😍","play":true,"duration":5000}
+         */
+        private void handleSetEmoji(JSONObject message) {
+            String emoji = message.optString("emoji", "");
+            boolean shouldPlay = message.optBoolean("play", false);
+            long duration = message.optLong("duration", 0);
+
+            Log.d(TAG, "Set emoji: '" + emoji + "', play: " + shouldPlay);
+
+            if (emoji.isEmpty()) {
+                // Clear current emoji
+                EmojiRegistry.getInstance().clearEmoji();
+                sendSuccess("Emoji cleared");
+                return;
+            }
+
+            // Set the emoji in the registry
+            boolean success = EmojiRegistry.getInstance().setEmoji(emoji);
+            if (!success) {
+                sendError("EMOJI_RENDER_FAILED",
+                        "Failed to render emoji: " + emoji);
+                return;
+            }
+
+            if (shouldPlay) {
+                // Trigger NOTIFICATION_EMOJI animation
+                AnimationRenderer.AnimState state = AnimationRenderer.AnimState.NOTIFICATION_EMOJI;
+                if (duration <= 0) {
+                    AnimationStateRepository.getInstance().setExternalState(state);
+                } else {
+                    AnimationStateRepository.getInstance().setExternalState(state, duration);
+                }
+                sendSuccess("Emoji set to: " + emoji + " (animation playing)");
+            } else {
+                sendSuccess("Emoji set to: " + emoji);
+            }
+        }
+
+        /**
+         * Handle the request_available_emojis command.
+         * Returns the curated list of emojis suitable for eye-replacement.
+         */
+        private void handleRequestAvailableEmojis() {
+            Log.d(TAG, "Available emojis requested");
+            try {
+                EmojiRegistry registry = EmojiRegistry.getInstance();
+                JSONObject response = new JSONObject();
+                response.put("type", RESP_AVAILABLE_EMOJIS);
+                response.put("emojis", new JSONArray(registry.getAvailableEmojis()));
+
+                String current = registry.getCurrentEmoji();
+                if (current != null) {
+                    response.put("current_emoji", current);
+                }
+
+                response.put("timestamp", System.currentTimeMillis());
+                sendJson(response);
+            } catch (JSONException e) {
+                Log.e(TAG, "Error creating available emojis response", e);
+                sendError("EMOJI_ERROR", "Failed to get available emojis");
+            }
         }
 
         private void handleRequestSignals() {

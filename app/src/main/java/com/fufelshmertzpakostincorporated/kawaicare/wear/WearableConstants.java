@@ -42,6 +42,12 @@ public final class WearableConstants {
     /** Path for signal validation errors */
     public static final String PATH_SIGNAL_VALIDATION_ERROR = "/signal_validation_error";
 
+    /** Path for emoji selection */
+    public static final String PATH_SET_EMOJI = "/set_emoji";
+
+    /** Path for requesting available emojis */
+    public static final String PATH_REQUEST_AVAILABLE_EMOJIS = "/request_available_emojis";
+
     // ===========================================
     // Data Layer Keys
     // ===========================================
@@ -82,6 +88,12 @@ public final class WearableConstants {
 
     /** Key for timestamps (force update) */
     public static final String KEY_TIMESTAMP = "timestamp";
+
+    /** Key for emoji string (Unicode emoji character) */
+    public static final String KEY_EMOJI = "key_emoji";
+
+    /** Key for available emojis list */
+    public static final String KEY_AVAILABLE_EMOJIS = "key_available_emojis";
 
     // ===========================================
     // Message Paths
