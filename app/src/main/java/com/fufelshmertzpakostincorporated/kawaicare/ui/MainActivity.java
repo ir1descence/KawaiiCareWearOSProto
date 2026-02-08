@@ -322,59 +322,104 @@ public class MainActivity extends Activity implements
     /**
      * Show a dialog displaying the 6-digit pairing code.
      * The user must read this code and enter it on the connecting device.
+     * 
+     * Design: Cute, minimalist aesthetic optimized for round watch faces.
+     * - Soft pastel gradient background
+     * - Centered circular-friendly layout
+     * - Friendly typography with gentle colors
      */
     private void showPairingCodeDialog(String code) {
         // Dismiss any existing dialog first
         dismissPairingCodeDialog();
 
-        // Create a custom layout for the pairing code display
+        // Pastel color palette for cute aesthetic
+        int bgColorTop = Color.parseColor("#FFF5F8");      // Soft pink-white
+        int bgColorMain = Color.parseColor("#FFFAF0");     // Warm cream
+        int accentColor = Color.parseColor("#FFB6C1");     // Light pink
+        int codeColor = Color.parseColor("#FF8FAB");       // Soft rose
+        int textPrimary = Color.parseColor("#5D5D7A");     // Gentle purple-gray
+        int textSecondary = Color.parseColor("#9999AA");   // Muted lavender
+
+        // Main container - optimized for round watch faces
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setGravity(Gravity.CENTER);
-        layout.setPadding(32, 48, 32, 48);
-        layout.setBackgroundColor(Color.parseColor("#1A1A2E"));
+        
+        // Calculate padding for round display (more padding on sides for circular crop)
+        int horizontalPadding = (int) TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_DIP, 24, getResources().getDisplayMetrics());
+        int verticalPadding = (int) TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_DIP, 0, getResources().getDisplayMetrics());
+        layout.setPadding(horizontalPadding, verticalPadding, horizontalPadding, verticalPadding);
+        layout.setBackgroundColor(bgColorMain);
 
-        // Title
+        // Cute decorative element (heart/star emoji as header)
+        TextView decorView = new TextView(this);
+        decorView.setText("💕");
+        decorView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        decorView.setGravity(Gravity.CENTER);
+        decorView.setPadding(0, 0, 0, 4);
+        layout.addView(decorView);
+
+        // Title - friendly and warm
         TextView titleView = new TextView(this);
-        titleView.setText("Pairing Code");
-        titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
-        titleView.setTextColor(Color.WHITE);
+        titleView.setText("Pair with Phone");
+        titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        titleView.setTextColor(textPrimary);
+        titleView.setTypeface(Typeface.DEFAULT_BOLD);
         titleView.setGravity(Gravity.CENTER);
+        titleView.setPadding(0, 0, 0, 12);
         layout.addView(titleView);
 
-        // Code display with spacing between digits
-        TextView codeView = new TextView(this);
-        StringBuilder formattedCode = new StringBuilder();
+        // Code container with soft rounded background appearance
+        LinearLayout codeContainer = new LinearLayout(this);
+        codeContainer.setOrientation(LinearLayout.HORIZONTAL);
+        codeContainer.setGravity(Gravity.CENTER);
+        codeContainer.setPadding(16, 12, 16, 12);
+        
+        // Create individual digit views for cleaner look
         for (int i = 0; i < code.length(); i++) {
-            formattedCode.append(code.charAt(i));
-            if (i < code.length() - 1) {
-                formattedCode.append("  "); // Add spacing between digits
-            }
+            TextView digitView = new TextView(this);
+            digitView.setText(String.valueOf(code.charAt(i)));
+            digitView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
+            digitView.setTextColor(codeColor);
+            digitView.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+            digitView.setGravity(Gravity.CENTER);
+            
+            // Add gentle spacing between digits, with extra space in middle
+            int marginEnd = (i == 2) ? 16 : 6; // Extra gap after 3rd digit
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            params.setMarginEnd(marginEnd);
+            digitView.setLayoutParams(params);
+            
+            codeContainer.addView(digitView);
         }
-        codeView.setText(formattedCode.toString());
-        codeView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 32);
-        codeView.setTextColor(Color.parseColor("#00FF88"));
-        codeView.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-        codeView.setGravity(Gravity.CENTER);
-        codeView.setPadding(0, 24, 0, 24);
-        layout.addView(codeView);
+        layout.addView(codeContainer);
 
-        // Instructions
+        // Instruction text - soft and minimal
         TextView instructionView = new TextView(this);
-        instructionView.setText("Enter this code on your phone");
-        instructionView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        instructionView.setTextColor(Color.LTGRAY);
+        instructionView.setText("enter on phone ✨");
+        instructionView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        instructionView.setTextColor(textSecondary);
         instructionView.setGravity(Gravity.CENTER);
+        instructionView.setPadding(0, 8, 0, 0);
         layout.addView(instructionView);
 
-        // Build and show dialog
+        // Build dialog with transparent background to show our custom layout
         pairingDialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setView(layout)
                 .setCancelable(false)
                 .create();
 
-        // Make dialog non-dismissable
+        // Make dialog non-dismissable and style the window
         pairingDialog.setCanceledOnTouchOutside(false);
+        
+        // Apply rounded corners effect by setting window background
+        if (pairingDialog.getWindow() != null) {
+            pairingDialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent);
+        }
 
         // Show the dialog
         if (!isFinishing()) {
