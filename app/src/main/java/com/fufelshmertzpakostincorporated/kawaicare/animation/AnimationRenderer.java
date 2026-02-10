@@ -374,15 +374,24 @@ public class AnimationRenderer {
             Log.w(TAG, "Cannot set emoji animation: compositor not ready");
             return;
         }
+
+        // Stop the render loop briefly to prevent overlap with the previous animation
+        mainHandler.removeCallbacks(animationLoop);
+
         this.emojiCompositor = compositor;
         this.mode = AnimationMode.EMOJI_OVERLAY;
         this.emojiFrameIndex = 0;
         this.currentFrameIndex.set(0);
         this.cycleCount.set(0);
 
-        // Clear folder-mode data to avoid confusion
+        // Clear folder-mode data to prevent any overlap
         this.face = null;
         this.compositor = null;
+        this.currentFolderPath = null;
+        synchronized (pendingStateLock) {
+            pendingState = null;
+            pendingFolderPath = null;
+        }
 
         // Notify duration callback with total emoji animation duration
         if (durationCallback != null) {
@@ -391,6 +400,11 @@ public class AnimationRenderer {
             mainHandler.post(() ->
                     durationCallback.onAnimationDurationCalculated(
                             "emoji_animation", duration, frameCount));
+        }
+
+        // Restart the render loop so it picks up the emoji mode cleanly
+        if (isRunning.get()) {
+            mainHandler.post(animationLoop);
         }
 
         Log.i(TAG, "Emoji animation mode set: " + compositor.getTotalFrameCount() + " frames");

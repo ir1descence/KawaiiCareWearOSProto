@@ -4,6 +4,8 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffXfermode;
 import android.graphics.RectF;
 import android.util.Log;
 
@@ -16,15 +18,16 @@ import java.util.List;
  * Composites emoji overlays onto eyeless body animation frames.
  * 
  * The emoji animation consists of two sequential phases:
- * 1. Before-blink ({@link #FOLDER_BEFORE_BLINK}): Avatar closes eyes — emoji begins appearing
- * 2. After-blink ({@link #FOLDER_AFTER_BLINK}): Emoji disappears — avatar opens eyes
+ * 1. After-blink ({@link #FOLDER_AFTER_BLINK}): Avatar closes eyes — emoji begins appearing
+ * 2. Before-blink ({@link #FOLDER_BEFORE_BLINK}): Emoji disappears — avatar opens eyes
  * 
  * Between configurable start/end frames, the selected emoji is drawn on top
  * of the base animation frames (which show the body without eyes).
+ * The emoji is rendered at both the left-eye and right-eye positions simultaneously.
  * 
  * Combined frame flow:
  * <pre>
- * [before_blink: 0..N-1] → [after_blink: N..N+M-1]
+ * [after_blink: 0..N-1] → [before_blink: N..N+M-1]
  *         ^                            ^
  *    emojiStartFrame            emojiEndFrame
  *         |__________________________|
@@ -42,10 +45,10 @@ public class EmojiCompositor {
     // Asset Folders
     // =========================================
 
-    /** Folder with frames showing eyes closing before emoji appears */
+    /** Folder with frames showing eyes opening after emoji disappears (plays second) */
     public static final String FOLDER_BEFORE_BLINK = "notification_emoji_before_blink";
 
-    /** Folder with frames showing eyes opening after emoji disappears */
+    /** Folder with frames showing eyes closing before emoji appears (plays first) */
     public static final String FOLDER_AFTER_BLINK = "notification_emoji_after_blink";
 
     // =========================================
@@ -56,13 +59,13 @@ public class EmojiCompositor {
      * Default frame in the before-blink sequence where emoji first becomes visible.
      * At this point the avatar's eyes should be fully closed.
      */
-    private static final int DEFAULT_EMOJI_START_FRAME = 25;
+    private static final int DEFAULT_EMOJI_START_FRAME = 68;
 
     /**
      * Default number of frames before the end of the after-blink sequence
      * where the emoji stops being visible (to allow the eye-open transition).
      */
-    private static final int DEFAULT_EMOJI_END_OFFSET = 25;
+    private static final int DEFAULT_EMOJI_END_OFFSET = 55;
 
     // Cooldown constraints (ms)
     private static final long DEFAULT_EMOJI_COOLDOWN_MS = 1500;
@@ -85,7 +88,9 @@ public class EmojiCompositor {
     private int emojiEndFrame;  // Calculated from totalFrameCount − offset
     private volatile Bitmap emojiBitmap;
     private final Paint emojiPaint;
-    private RectF emojiRect;    // Custom position (null = auto-center)
+    private final Paint basePaint;  // SRC mode paint for base frame (prevents stale buffer bleed-through)
+    private RectF leftEyeRect;   // Custom left-eye position (null = auto-calculate)
+    private RectF rightEyeRect;  // Custom right-eye position (null = auto-calculate)
 
     // Composition buffer (reused across frames to avoid allocation)
     private Bitmap compositionBitmap;
@@ -106,6 +111,11 @@ public class EmojiCompositor {
     public EmojiCompositor(Context context) {
         this.context = context.getApplicationContext();
         this.emojiPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+
+        // SRC mode paint for base frame: fully replaces the composition buffer
+        // content instead of alpha-blending on top of stale data from previous frames.
+        this.basePaint = new Paint();
+        this.basePaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC));
     }
 
     /**
@@ -113,17 +123,18 @@ public class EmojiCompositor {
      * Must be called once before any rendering.
      */
     public void initialize() {
-        loadFrameList(FOLDER_BEFORE_BLINK, beforeBlinkFrames);
+        // Load after_blink first (eyes closing / emoji appearing), then before_blink (emoji disappearing / eyes opening)
         loadFrameList(FOLDER_AFTER_BLINK, afterBlinkFrames);
+        loadFrameList(FOLDER_BEFORE_BLINK, beforeBlinkFrames);
 
-        totalFrameCount = beforeBlinkFrames.size() + afterBlinkFrames.size();
+        totalFrameCount = afterBlinkFrames.size() + beforeBlinkFrames.size();
 
         // Calculate default end frame (offset from the end of the combined sequence)
         emojiEndFrame = Math.max(0, totalFrameCount - DEFAULT_EMOJI_END_OFFSET);
 
         isInitialized = totalFrameCount > 0;
-        Log.i(TAG, "Initialized: " + beforeBlinkFrames.size() + " before-blink + "
-                + afterBlinkFrames.size() + " after-blink = " + totalFrameCount + " total frames. "
+        Log.i(TAG, "Initialized: " + afterBlinkFrames.size() + " after-blink (phase 1) + "
+                + beforeBlinkFrames.size() + " before-blink (phase 2) = " + totalFrameCount + " total frames. "
                 + "Emoji visible: frames " + emojiStartFrame + "–" + emojiEndFrame);
     }
 
@@ -170,11 +181,13 @@ public class EmojiCompositor {
     }
 
     /**
-     * Set a custom position and size for the emoji overlay.
-     * @param rect Rectangle defining the drawing area, or null for auto-center
+     * Set custom positions for the left-eye and right-eye emoji overlays.
+     * @param leftEye  Rectangle for the left-eye emoji, or null for auto-calculate
+     * @param rightEye Rectangle for the right-eye emoji, or null for auto-calculate
      */
-    public void setEmojiPosition(RectF rect) {
-        this.emojiRect = rect;
+    public void setEyePositions(RectF leftEye, RectF rightEye) {
+        this.leftEyeRect = leftEye;
+        this.rightEyeRect = rightEye;
     }
 
     /**
@@ -272,12 +285,12 @@ public class EmojiCompositor {
         return totalFrameCount * AnimationConfig.FRAME_DELAY_30FPS;
     }
 
-    /** Frame count of the before-blink phase. */
+    /** Frame count of the before-blink phase (plays second). */
     public int getBeforeBlinkFrameCount() {
         return beforeBlinkFrames.size();
     }
 
-    /** Frame count of the after-blink phase. */
+    /** Frame count of the after-blink phase (plays first). */
     public int getAfterBlinkFrameCount() {
         return afterBlinkFrames.size();
     }
@@ -294,13 +307,15 @@ public class EmojiCompositor {
             return null;
         }
 
-        int beforeCount = beforeBlinkFrames.size();
-        if (frameIndex < beforeCount) {
-            return FOLDER_BEFORE_BLINK + "/" + beforeBlinkFrames.get(frameIndex);
+        // Phase 1: after_blink frames (eyes closing, emoji appearing)
+        int afterCount = afterBlinkFrames.size();
+        if (frameIndex < afterCount) {
+            return FOLDER_AFTER_BLINK + "/" + afterBlinkFrames.get(frameIndex);
         } else {
-            int afterIndex = frameIndex - beforeCount;
-            if (afterIndex < afterBlinkFrames.size()) {
-                return FOLDER_AFTER_BLINK + "/" + afterBlinkFrames.get(afterIndex);
+            // Phase 2: before_blink frames (emoji disappearing, eyes opening)
+            int beforeIndex = frameIndex - afterCount;
+            if (beforeIndex < beforeBlinkFrames.size()) {
+                return FOLDER_BEFORE_BLINK + "/" + beforeBlinkFrames.get(beforeIndex);
             }
         }
         return null;
@@ -344,8 +359,10 @@ public class EmojiCompositor {
         // Ensure the composition buffer matches the base frame dimensions
         ensureCompositionBuffer(baseFrame.getWidth(), baseFrame.getHeight());
 
-        // Draw base frame
-        compositionCanvas.drawBitmap(baseFrame, 0, 0, null);
+        // Draw base frame using SRC mode to fully replace the buffer content.
+        // Default SRC_OVER would alpha-blend onto stale buffer data, causing
+        // the previous emoji to bleed through transparent areas of the base frame.
+        compositionCanvas.drawBitmap(baseFrame, 0, 0, basePaint);
 
         // Draw emoji overlay if this frame is in the visible zone
         if (isEmojiVisibleAtFrame(frameIndex)) {
@@ -371,16 +388,27 @@ public class EmojiCompositor {
         Bitmap emoji = emojiBitmap;
         if (emoji == null || emoji.isRecycled()) return;
 
-        if (emojiRect != null) {
-            // Custom position supplied
-            canvas.drawBitmap(emoji, null, emojiRect, emojiPaint);
+        if (leftEyeRect != null && rightEyeRect != null) {
+            // Custom eye positions supplied
+            canvas.drawBitmap(emoji, null, leftEyeRect, emojiPaint);
+            canvas.drawBitmap(emoji, null, rightEyeRect, emojiPaint);
         } else {
-            // Auto-center: 40% of canvas width, slightly above center (eye region)
-            float emojiSize = canvasWidth * 0.4f;
-            float left = (canvasWidth - emojiSize) / 2f;
-            float top = (canvasHeight - emojiSize) / 2f - (canvasHeight * 0.05f);
+            // Auto-calculate dual-eye positions
+            // Each emoji is ~40% of canvas width, positioned in the eye region
+            float emojiSize = canvasWidth * 0.40f;
+            float eyeY = (canvasHeight * 0.5f) - (emojiSize / 2f);
+
+            // Left eye: ~25% from left edge
+            float leftEyeX = (canvasWidth * 0.25f) - (emojiSize / 2f);
             canvas.drawBitmap(emoji, null,
-                    new RectF(left, top, left + emojiSize, top + emojiSize), emojiPaint);
+                    new RectF(leftEyeX, eyeY, leftEyeX + emojiSize, eyeY + emojiSize),
+                    emojiPaint);
+
+            // Right eye: ~75% from left edge
+            float rightEyeX = (canvasWidth * 0.75f) - (emojiSize / 2f);
+            canvas.drawBitmap(emoji, null,
+                    new RectF(rightEyeX, eyeY, rightEyeX + emojiSize, eyeY + emojiSize),
+                    emojiPaint);
         }
     }
 

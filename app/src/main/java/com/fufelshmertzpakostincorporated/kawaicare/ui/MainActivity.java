@@ -859,9 +859,10 @@ public class MainActivity extends Activity implements
     @Override
     public void onAnimationStateChanged(AnimationRenderer.AnimState state) {
         Log.d(TAG, "Animation state changed to: " + state);
-        if (imageView != null) {
-            imageView.post(() -> setAnimationForState(state));
-        }
+        // Call directly — notifyStateChanged() guarantees main-thread delivery.
+        // Using imageView.post() would add an extra frame-tick of delay during
+        // which the old animation (e.g. notification_postpone) keeps rendering.
+        setAnimationForState(state);
     }
 
     @Override

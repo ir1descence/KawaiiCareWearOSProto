@@ -322,8 +322,9 @@ public class AnimationStateRepository implements AnimationFSM.FSMListener {
                 return "notification_postpone";
             case NOTIFICATION_EMOJI:
                 // Emoji animation is handled specially by EmojiCompositor
-                // (two folders + overlay). Return the before-blink folder as primary.
-                return EmojiCompositor.FOLDER_BEFORE_BLINK;
+                // (two folders + overlay). Return the after-blink folder as primary
+                // since it plays first in the combined sequence.
+                return EmojiCompositor.FOLDER_AFTER_BLINK;
             default:
                 return "blinks";
         }
