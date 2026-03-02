@@ -265,6 +265,12 @@ public class MainActivity extends Activity implements
                     shouldContinueLooping = gestureRecordingController != null && gestureRecordingController.isRecording();
                     break;
 
+                case ALARM:
+                    // Alarm animation loops while the alarm is active
+                    shouldContinueLooping = isAlarmActive;
+                    Log.d(TAG, "ALARM cycle complete - alarm still active: " + shouldContinueLooping);
+                    break;
+
                 case NOTIFICATION_EMOJI:
                     // Emoji animation is one-shot: play the full before-blink + after-blink
                     // sequence once, then return to IDLE. Mark cooldown on the compositor.
@@ -275,7 +281,7 @@ public class MainActivity extends Activity implements
                     break;
                     
                 default:
-                    // One-shot animations (GESTURE_ACTION, ALARM, FRIGHT, etc.)
+                    // One-shot animations (GESTURE_ACTION, FRIGHT, etc.)
                     // Play once then notify FSM to transition
                     shouldContinueLooping = false;
                     break;
@@ -821,10 +827,12 @@ public class MainActivity extends Activity implements
         
         Log.d(TAG, "Shake STARTED - triggering shake animation");
 
-        // If alarm is active and no custom gesture, shake stops the alarm
-        if (isAlarmActive && !gestureMatcher.hasCustomGesture()) {
-            Log.d(TAG, "Shake detected during alarm - stopping alarm");
-            dismissAlarm();
+        // During active alarm, ignore SensorController shake events.
+        // Alarm dismissal via shake is handled exclusively by GestureMatcher,
+        // which uses a stricter threshold (2.5g, 3 shakes in 1500ms) that
+        // won't be triggered by the alarm's own vibration motor.
+        if (isAlarmActive) {
+            Log.d(TAG, "Shake ignored - alarm active, deferring to GestureMatcher");
             return;
         }
 
@@ -973,8 +981,9 @@ public class MainActivity extends Activity implements
         if (AnimationStateRepository.getInstance().isExternalAnimationActive()) {
             AnimationStateRepository.getInstance().endExternalAnimation();
         }
-        AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.ALARM);
-        imageView.postDelayed(() -> AnimationStateRepository.getInstance().setState(AnimationRenderer.AnimState.IDLE), 5000);
+        // Delegate to the standard alarm activation flow which keeps
+        // the alarm active until the user performs the dismissal gesture.
+        handleAlarmActivation();
     }
 
     // --- AlarmStatusRepository.AlarmStatusListener ---
